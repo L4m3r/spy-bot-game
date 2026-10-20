@@ -11,6 +11,7 @@
     "init:secrets": "node scripts/prepare-env.mjs",
     "predeploy": "node --env-file=.dev.vars scripts/validate-env.mjs",
     "deploy": "wrangler deploy --secrets-file .dev.vars",
+    "deploy:ci": "wrangler deploy",
     "setup:telegram": "node --env-file=.dev.vars scripts/setup-telegram.mjs"
   },
   "engines": { "node": ">=22" },

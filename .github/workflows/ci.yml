@@ -1,0 +1,81 @@
+name: Checks and deploy
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Keep production deployments running; replace obsolete PR checks.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    name: TypeScript, tests and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Check TypeScript
+        run: npm run check
+      - name: Run integration tests
+        run: npm test
+      - name: Validate Worker build
+        run: npm run build
+
+  deploy:
+    name: Deploy to Cloudflare
+    needs: checks
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check deployment configuration
+        id: config
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [[ -z "$CLOUDFLARE_API_TOKEN" || -z "$CLOUDFLARE_ACCOUNT_ID" ]]; then
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::Deployment skipped: add CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID repository secrets.'
+            echo 'Deployment skipped. Add `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` in repository Settings → Secrets and variables → Actions, then run this workflow on main.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'configured=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Check out checked source
+        if: steps.config.outputs.configured == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        if: steps.config.outputs.configured == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install locked dependencies
+        if: steps.config.outputs.configured == 'true'
+        run: npm ci
+      - name: Deploy Worker and Durable Object migrations
+        if: steps.config.outputs.configured == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run deploy:ci
