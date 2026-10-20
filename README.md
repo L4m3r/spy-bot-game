@@ -148,23 +148,28 @@ npm run dev
 
 После изменений выполните проверки и `npm run deploy`. Если адрес и webhook-секрет не менялись, заново настраивать webhook не нужно. После изменения `WEBHOOK_SECRET` повторите `npm run setup:telegram`.
 
-## GitHub Actions
+## Проверки PR и Workers Builds
 
-Workflow `.github/workflows/ci.yml` проверяет pull request в `main` и каждый push в `main`: установка по lock-файлу, TypeScript, интеграционные тесты и сборка Worker. Используется Node.js 24. После успешных проверок push в `main` автоматически запускает деплой в существующий Worker, включая миграции Durable Objects. Ручной запуск доступен на вкладке Actions через Run workflow; деплой разрешён только из `main`.
+Workflow `.github/workflows/ci.yml` запускается только для pull request в `main`: установка по lock-файлу, TypeScript, интеграционные тесты и сборка Worker. Новый коммит в тот же PR отменяет устаревшие проверки. Деплоем занимается Cloudflare Workers Builds после push в `main`.
 
-Для включения деплоя добавьте **Repository secrets** в Settings → Secrets and variables → Actions:
+GitHub Actions и Workers Builds используют Node.js 24 из `.node-version`. Actions закреплены полными SHA; GitHub Token имеет только `contents: read`, а credentials checkout не сохраняются. Cloudflare Secrets в GitHub Actions не используются.
 
-| Имя | Значение |
+В существующем Worker `spy-telegram-bot` откройте Settings → Build, подключите репозиторий и задайте:
+
+| Настройка Workers Builds | Значение |
 | --- | --- |
-| `CLOUDFLARE_API_TOKEN` | Отдельный API token для деплоя Workers в нужном аккаунте Cloudflare |
-| `CLOUDFLARE_ACCOUNT_ID` | ID того же аккаунта Cloudflare |
+| Репозиторий | `L4m3r/spy-bot-game` |
+| Production branch | `main` |
+| Root directory | `/` (корень репозитория) |
+| Build command | `npm run check && npm test && npm run build` |
+| Deploy command | `npm run deploy:ci` |
 
-Создайте токен в Cloudflare через API Tokens → Create Token → шаблон **Edit Cloudflare Workers**. Ограничьте его ресурсами аккаунта, где размещён бот. Значение токена вводится только в GitHub Secret, не в код, README или сообщения чата. Подробности: [авторизация GitHub Actions в Cloudflare](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/).
+Cloudflare запросит разрешение GitHub-интеграции на доступ к репозиторию. Авторизацию деплоя настройте в Workers Builds; Cloudflare может автоматически создать API token. Секреты `CLOUDFLARE_API_TOKEN` и `CLOUDFLARE_ACCOUNT_ID` в GitHub не требуются. Если они были добавлены для прежней схемы, их можно удалить из GitHub.
 
-`BOT_TOKEN` и `WEBHOOK_SECRET` уже находятся в Cloudflare и сохраняются при обычном деплое кода. В GitHub их добавлять не нужно. Workflow использует `npm run deploy:ci`, которому не требуется локальный `.dev.vars`. Локальная команда `npm run deploy` по-прежнему загружает секреты из `.dev.vars`.
+Workers Builds выполняет собственные проверки перед публикацией: отдельный успешный запуск GitHub Actions не является условием для его деплоя. Если любая команда в Build command завершится с ошибкой, публикация остановится.
 
-До добавления обоих GitHub Secrets выполняются проверки, а шаги деплоя пропускаются с уведомлением в сводке запуска. После настройки секретов запустите Run workflow на `main` или сделайте новый push.
+`BOT_TOKEN` и `WEBHOOK_SECRET` остаются в Cloudflare в Settings → Variables & Secrets и сохраняются при обычном деплое кода. В build variables и GitHub их добавлять не нужно. Для Workers Builds используется `npm run deploy:ci`, которому не требуется локальный `.dev.vars`. Локальная команда `npm run deploy` по-прежнему загружает секреты из `.dev.vars`.
 
-PR, включая PR из fork, не получают доступ к Cloudflare Secrets и не запускают деплой. Actions закреплены полными SHA; GitHub Token имеет только `contents: read`, а credentials checkout не сохраняются. Проверки используют npm cache, job деплоя устанавливает зависимости без него. Деплои в `main` выполняются последовательно; начавшийся деплой не отменяется новым push.
+Настройка подключения в панели Cloudflare выполняется отдельно от коммита workflow. После подключения проверьте первый build/deploy. Подробности: [настройки Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/).
 
 Документация: [grammY на Workers](https://grammy.dev/hosting/cloudflare-workers-nodejs), [DO и SQLite](https://developers.cloudflare.com/durable-objects/best-practices/access-durable-objects-storage/), [Alarms](https://developers.cloudflare.com/durable-objects/api/alarms/), [секреты Cloudflare](https://developers.cloudflare.com/workers/configuration/secrets/).
