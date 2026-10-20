@@ -1,0 +1,25 @@
+{
+  "name": "spy-telegram-bot",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "check": "tsc --noEmit",
+    "build": "wrangler deploy --dry-run",
+    "test": "node --test test/*.test.mjs",
+    "init:secrets": "node scripts/prepare-env.mjs",
+    "predeploy": "node --env-file=.dev.vars scripts/validate-env.mjs",
+    "deploy": "wrangler deploy --secrets-file .dev.vars",
+    "setup:telegram": "node --env-file=.dev.vars scripts/setup-telegram.mjs"
+  },
+  "engines": { "node": ">=22" },
+  "dependencies": { "grammy": "^1.46.0" },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261018.1",
+    "esbuild": "^0.25.11",
+    "miniflare": "^4.20260730.0",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.151.1"
+  }
+}
