@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "preview:miniapp": "node scripts/preview-miniapp.mjs",
     "dev": "wrangler dev",
     "check": "tsc --noEmit",
     "build": "wrangler deploy --dry-run",
