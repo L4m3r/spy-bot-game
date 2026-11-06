@@ -26,7 +26,7 @@ async function roomCode(secret: string, userId: number, updateId: number): Promi
 async function makeBot(env: Env) {
   const identity = await getIdentity(env.BOT_TOKEN);
   const bot = new Bot(env.BOT_TOKEN, { botInfo: identity, client: { timeoutSeconds: 15 } });
-  const welcome = "🕵️ Шпион\n\nСоздай комнату и отправь друзьям приглашение. Когда соберётся от 3 до 12 игроков, раздай карточки.\n\nВсе обсуждения, обвинения и угадывание локации — голосом.\n\n/game — текущая или новая комната\n/locations — список возможных локаций";
+  const welcome = "🕵️ Шпион\n\nСоздай комнату и отправь друзьям приглашение. Когда соберётся от 3 до 12 игроков, раздай карточки.\n\nВсе обсуждения, обвинения и угадывание локации — голосом.\n\n/game — текущая или новая комната\n/leave — выйти из комнаты\n/locations — список возможных локаций";
   const createKeyboard = () => new InlineKeyboard().text("Создать игру", "create");
 
   bot.use(async (ctx, next) => {
@@ -45,21 +45,12 @@ async function makeBot(env: Env) {
       actor: { id: ctx.from.id, name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ").replace(/[\r\n]/g, " ").slice(0, 48) },
       username: identity.username!,
     };
-    if (action === "create") {
-      const opened = await rpcData(env.USER_LIMITS.getByName(String(ctx.from.id)).open(command));
-      if (opened.error) await ctx.reply(opened.error);
-      else if (opened.reused && opened.code) {
-        await ctx.reply(`У тебя уже есть активная комната:\nhttps://t.me/${identity.username}?start=room_${opened.code}`, {
-          reply_markup: new InlineKeyboard().text("Показать комнату", `show:${opened.code}`),
-          link_preview_options: { is_disabled: true },
-        });
-      }
-      return { error: opened.error };
+    const result = await rpcData(env.USER_LIMITS.getByName(String(ctx.from.id)).dispatch(command));
+    if (result.error || result.message) {
+      await ctx.reply(result.error ?? result.message!, result.confirmCloseCode ? {
+        reply_markup: new InlineKeyboard().text("Да, закрыть комнату", `close:${result.confirmCloseCode}`).row().text("Остаться в комнате", `show:${result.confirmCloseCode}`),
+      } : undefined);
     }
-    const result = await rpcData(action === "close"
-      ? env.USER_LIMITS.getByName(String(ctx.from.id)).closeRoom(command)
-      : env.ROOMS.getByName(code).dispatch(command));
-    if (result.error || result.message) await ctx.reply(result.error ?? result.message!);
     return result;
   }
 
@@ -74,6 +65,7 @@ async function makeBot(env: Env) {
     if (!ctx.from) return;
     await dispatch(ctx, "create", await roomCode(env.WEBHOOK_SECRET, ctx.from.id, ctx.update.update_id));
   });
+  bot.command("leave", ctx => dispatch(ctx, "leave", "").then(() => undefined));
   bot.callbackQuery("locations", async ctx => {
     await ctx.answerCallbackQuery();
     await ctx.reply(`Возможные локации (общий список для всех):\n\n${LOCATIONS.join("\n")}`);

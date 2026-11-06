@@ -5,7 +5,7 @@ export function lobbyView(state: RoomState, userId: number) {
   const owner = userId === state.ownerId;
   const invite = `https://t.me/${state.username}?start=room_${state.code}`;
   const players = state.members.map((player, index) => {
-    const waiting = state.round && !state.round.playerIds.includes(player.id);
+    const waiting = state.round && state.round.membershipIds[player.id] !== player.membershipId;
     return `${index + 1}. ${player.name}${player.id === state.ownerId ? " 👑" : ""}${waiting ? " — со следующего раунда" : ""}`;
   }).join("\n");
   const round = state.round;
