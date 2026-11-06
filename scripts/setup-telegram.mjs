@@ -47,6 +47,7 @@ try {
   const identity = await telegram("getMe");
   await telegram("setMyCommands", { commands: [
     { command: "game", description: "Открыть или создать комнату" },
+    { command: "leave", description: "Выйти из текущей комнаты" },
     { command: "locations", description: "Все возможные локации" },
     { command: "help", description: "Как играть" },
   ] });
