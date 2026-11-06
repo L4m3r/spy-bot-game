@@ -7,6 +7,7 @@ const files = new Map([
   ['/', ['index.html', 'text/html']], ['/index.html', ['index.html', 'text/html']],
   ['/app.html', ['app.html', 'text/html']], ['/app.css', ['app.css', 'text/css']],
   ['/app.js', ['app.js', 'text/javascript']], ['/preview.js', ['preview.js', 'text/javascript']],
+  ['/invites.js', ['invites.js', 'text/javascript']],
 ]);
 const port = Number(process.env.PORT || 8793);
 const server = createServer(async (request, response) => {

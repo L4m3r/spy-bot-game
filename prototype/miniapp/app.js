@@ -1,4 +1,5 @@
 // UI prototype only. No game RPC, Telegram messages or production mutations.
+import { prototypeInviteUrl, validInvite } from './invites.js';
 const telegram = window.Telegram?.WebApp;
 const root = document.documentElement;
 const view = document.querySelector('#view');
@@ -37,6 +38,7 @@ let generation = 0;
 let dialogResolve = null;
 let nativeAction = false;
 let noticeTimer;
+let roleFocusPending = false;
 
 function escape(value) { return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]); }
 function icon(name, extra = '') { return `<svg class="icon ${extra}" aria-hidden="true"><use href="#${name}"/></svg>`; }
@@ -44,6 +46,7 @@ function buttonRow(action, name, symbol, options = {}) {
   return `<button class="row ${options.blue ? 'blue' : ''} ${options.danger ? 'danger' : ''}" type="button" data-action="${action}">${icon(symbol)}<span>${name}${options.description ? `<small class="row-description">${options.description}</small>` : ''}</span>${options.end ? `<span class="row-end">${options.end}</span>` : options.chevron === false ? '' : icon('chevron', 'chevron')}</button>`;
 }
 function avatar(player) { return `<span class="avatar" data-tone="${player.tone}" aria-hidden="true">${escape(player.name[0])}</span>`; }
+function playerCount(count) { return `${count} ${count % 100 >= 11 && count % 100 <= 14 ? 'игроков' : count % 10 === 1 ? 'игрок' : count % 10 >= 2 && count % 10 <= 4 ? 'игрока' : 'игроков'}`; }
 function hero(title, copy, symbol = 'mask') { return `<header class="hero"><span class="app-avatar" aria-hidden="true">${icon(symbol)}</span><h1 tabindex="-1">${title}</h1><p>${copy}</p></header>`; }
 function title(name, copy = '') { return `<header class="screen-title"><h1 tabindex="-1">${name}</h1>${copy ? `<p>${copy}</p>` : ''}</header>`; }
 function section(name, content, note = '', count = '') { return `<section class="section"><div class="section-heading"><h2>${name}${count ? `<span class="count">${count}</span>` : ''}</h2></div>${content}${note ? `<p class="note">${note}</p>` : ''}</section>`; }
@@ -98,37 +101,42 @@ function playersList() {
 function home() {
   setPrimary(null);
   return hero('Шпион', 'Все знают место. Кроме одного.<br>Узнай, кто играет не свою роль.')
-    + (state.room ? section('Твоя игра', `<div class="group">${buttonRow('open-room', 'Вернуться в комнату', 'people', { description: `${state.players.length} игрока${state.round ? ' · Раунд ' + state.round : ' · Собираемся'}` })}</div>`) : '')
-    + `<div class="group ${state.room ? 'section' : ''}">${buttonRow('create', 'Создать игру', 'plus', { blue: true, chevron: false })}${buttonRow('join', 'У меня есть приглашение', 'link')}</div>`
+    + (state.room ? section('Твоя игра', `<div class="group">${buttonRow('open-room', 'Вернуться в комнату', 'people', { description: `${playerCount(state.players.length)}${state.round ? ' · Раунд ' + state.round : ' · Собираемся'}` })}</div>`) : '')
+    + `<div class="group ${state.room ? 'section' : ''}">${state.room ? '' : buttonRow('create', 'Создать игру', 'plus', { blue: true, chevron: false })}${buttonRow('join', 'У меня есть приглашение', 'link')}</div>`
     + '<p class="note">3–12 игроков · один шпион · играете голосом</p>'
     + section('Перед игрой', `<div class="group">${buttonRow('rules', 'Как играть', 'info')}${buttonRow('locations', 'Возможные локации', 'pin', { end: '24' })}</div>`, 'Достаточно одного телефона на каждого игрока. Бота не нужно добавлять в общий чат.');
 }
 function room() {
   const ready = state.players.length >= 3;
-  setPrimary(state.owner ? state.round ? 'К раунду ' + state.round : 'Раздать карточки' : state.round ? state.inRound ? 'К моей карточке' : 'Открыть раунд' : null, state.round ? 'round' : 'deal', state.round || ready);
+  const full = state.players.length >= 12;
+  const failed = state.deliveryFailed;
+  setPrimary(failed && state.owner ? 'Повторить отправку' : state.owner ? state.round ? 'К раунду ' + state.round : 'Раздать карточки' : state.round ? state.inRound ? 'К моей карточке' : 'Открыть раунд' : null, failed && state.owner ? 'retry' : state.round ? 'round' : 'deal', state.round || ready);
   const status = state.round
     ? `<div class="status-card">${icon(state.inRound ? 'card' : 'people')}<div><h2>${state.inRound ? 'Раунд ' + state.round + ' идёт' : 'Ты в следующем раунде'}</h2><p>${state.inRound ? 'Карточки розданы. Можно начинать обсуждение.' : 'Эта раздача уже началась. Пока присоединяйся к разговору.'}</p></div></div>`
-    : `<div class="status-card">${icon('people')}<div><h2>${ready ? state.owner ? 'Все готовы к игре?' : 'Ждём организатора' : 'Собираем компанию'}</h2><p>${ready ? state.owner ? 'Когда все соберутся, раздай карточки. Состав можно пополнить и позже.' : 'Карточки раздаст Анна, когда все будут готовы.' : state.players.length === 1 ? 'Пригласи ещё хотя бы двух друзей, чтобы начать.' : 'Нужен ещё один игрок, чтобы начать.'}</p></div></div>`;
+    : `<div class="status-card">${icon('people')}<div><h2>${ready ? state.owner ? 'Все готовы к игре?' : 'Ждём организатора' : 'Собираем компанию'}</h2><p>${ready ? state.owner ? 'Когда все соберутся, раздай карточки. Опоздавшие сыграют со следующего раунда.' : 'Карточки раздаст Анна, когда все будут готовы.' : state.players.length === 1 ? 'Пригласи ещё хотя бы двух друзей, чтобы начать.' : 'Нужен ещё один игрок, чтобы начать.'}</p></div></div>`;
   return `<header class="room-head"><span class="room-mark" aria-hidden="true">${icon('mask')}</span><div><h1 tabindex="-1">Комната «Шпион»</h1><p>${state.owner ? 'Ты — организатор' : 'Организатор — Анна'}</p></div></header>`
-    + status
+    + (failed ? deliveryNotice(false) : status)
+    + `<div class="group section">${full ? `<button class="row muted" type="button" disabled>${icon('people')}<span>Комната заполнена</span></button>` : buttonRow('invite', 'Пригласить друзей', 'plus', { blue: true, chevron: false })}</div>`
+    + `<p class="note">${full ? 'В комнате максимум 12 игроков. Пригласить ещё можно, когда освободится место.' : 'Можно присоединиться по ссылке, без поиска комнаты.'}</p>`
     + `<section class="section"><div class="section-heading"><h2>Игроки <span class="count">${state.players.length} / 12</span></h2><button class="icon-button" data-action="refresh" type="button" aria-label="Обновить состав">${icon('refresh')}</button></div>${playersList()}</section>`
-    + `<div class="group section">${buttonRow('invite', 'Пригласить друзей', 'plus', { blue: true, chevron: false })}</div>`
-    + '<p class="note">Можно присоединиться по ссылке, без поиска комнаты.</p>'
     + `<div class="group section">${buttonRow('locations', 'Возможные локации', 'pin', { end: '24' })}${buttonRow(state.owner ? 'close' : 'leave', state.owner ? 'Закрыть комнату' : 'Выйти из комнаты', 'exit', { danger: true, chevron: false })}</div>`
     + (!state.owner && !state.round ? '<p class="note">Карточки раздаст Анна, когда все соберутся.</p>' : '');
+}
+function deliveryNotice(inlineAction = true) {
+  return `<section class="group delivery-status" aria-labelledby="delivery-title"><h2 id="delivery-title">Не все получили карточки</h2><p>${state.owner ? 'Повтори отправку перед обсуждением. Роли и локация останутся прежними.' : 'Организатор повторит отправку. Дождитесь карточек перед обсуждением.'}</p>${state.owner && inlineAction ? `<button class="primary" type="button" data-action="retry"${pending ? ' disabled' : ''}>${pending ? 'Отправляем…' : 'Повторить отправку'}</button>` : ''}${!inlineAction && state.inRound ? '<button class="text-button" type="button" data-action="round">Открыть мою карточку</button>' : ''}</section>`;
 }
 function roleContents() {
   if (!state.inRound) return `<div class="role-symbol" aria-hidden="true">${icon('people')}</div><h2>Твой раунд впереди</h2><p>Ты присоединился после раздачи. Карточка появится, когда организатор начнёт следующий раунд.</p>`;
   if (!state.revealed) return `<div class="role-symbol" aria-hidden="true">${icon('lock')}</div><h2>Твоя карточка</h2><p>Посмотри её так, чтобы другие игроки не увидели экран.</p><button class="primary" data-action="reveal" type="button">${icon('eye')}Открыть карточку</button>`;
-  return `<div class="role-symbol" aria-hidden="true">${icon(state.spy ? 'mask' : 'pin')}</div><p class="role-eyebrow">${state.spy ? 'Твоя роль' : 'Локация этого раунда'}</p><h2>${state.spy ? 'Ты — шпион' : escape(locations[state.location])}</h2><p>${state.spy ? 'Выясни, где находятся остальные.<br>Слушай ответы и не выдавай себя.' : 'Ты не шпион. Найди того, кто не знает это место, не называя его вслух.'}</p><button class="text-button" data-action="hide" type="button">Скрыть карточку</button>`;
+  return `<div class="role-symbol" aria-hidden="true">${icon(state.spy ? 'mask' : 'pin')}</div><p class="role-eyebrow">${state.spy ? 'Твоя роль' : 'Локация этого раунда'}</p><h2 id="role-title" tabindex="-1" aria-label="${state.spy ? 'Твоя роль. Ты — шпион' : 'Локация этого раунда. ' + escape(locations[state.location])}" aria-describedby="role-description">${state.spy ? 'Ты — шпион' : escape(locations[state.location])}</h2><p id="role-description">${state.spy ? 'Выясни, где находятся остальные.<br>Слушай ответы и не выдавай себя.' : 'Ты не шпион. Найди того, кто не знает это место, не называя его вслух.'}</p><button class="text-button" data-action="hide" type="button">Скрыть карточку</button>`;
 }
 function round() {
   setPrimary(null);
   return title('Раунд ' + state.round, state.inRound ? 'Вопросы, догадки и обвинения — голосом.' : 'Наблюдай за игрой и дождись новой раздачи.')
+    + (state.deliveryFailed ? deliveryNotice() : '')
     + `<section id="role-card" class="group role-card ${state.revealed ? 'is-open role-enter' : ''} ${state.revealed && state.spy ? 'role-spy' : ''}" aria-label="Личная карточка">${roleContents()}</section>`
     + `<p class="quiet-note">${icon('lock')}<span>Карточка скрывается при уходе с экрана.</span></p>`
     + `<div class="group section">${buttonRow('locations', 'Возможные локации', 'pin', { end: '24' })}${buttonRow('lobby', 'Игроки в комнате', 'people', { end: state.players.length })}</div>`
-    + (state.deliveryFailed && state.owner ? `<div class="group section">${buttonRow('retry', 'Повторить отправку', 'refresh', { blue: true, description: 'Не все получили карточки в боте' })}</div>` : '')
     + (state.owner ? `<div class="group section">${buttonRow('next', 'Следующий раунд', 'refresh', { blue: true })}</div><p class="note">Начинай, когда закончите обсуждение. Текущие карточки заменятся новыми.</p>` : '<p class="note">Следующий раунд начнёт организатор.</p>');
 }
 function locationScreen() {
@@ -136,7 +144,7 @@ function locationScreen() {
   return title('Возможные локации', 'Одинаковый список для всех игроков. Здесь нет подсказки к текущему раунду.')
     + `<div class="field search">${icon('search')}<input id="location-search" type="search" placeholder="Поиск локации" aria-label="Поиск локации" autocomplete="off"><button id="clear-search" class="icon-button" type="button" aria-label="Очистить поиск" hidden>${icon('close')}</button></div>`
     + '<div class="section-heading"><h2>Все локации <span class="count" id="location-count">24</span></h2></div>'
-    + `<ul id="location-list" class="group location-list">${locations.map(name => `<li>${icon('pin')}<span>${name}</span></li>`).join('')}</ul><p id="search-empty" class="empty-result" role="status" hidden>Ничего не нашлось.<br>Попробуй другое название.</p>`;
+    + `<ul id="location-list" class="group location-list">${locations.map(name => `<li>${icon('pin')}<span>${name}</span></li>`).join('')}</ul><p id="search-empty" class="empty-result" hidden>Ничего не нашлось.<br>Попробуй другое название.</p>`;
 }
 function rules() {
   setPrimary('Понятно', 'back');
@@ -184,22 +192,35 @@ function render({ focus = true, animate = false } = {}) {
   if (parent !== window) parent.postMessage({ type: 'spy:state', screen: state.screen, players: state.players.length, round: state.round, owner: state.owner, spy: state.spy, inRound: state.inRound, deliveryFailed: state.deliveryFailed }, location.origin);
 }
 function go(screen, { replace = false } = {}) {
-  generation++; pending = false; conceal(false);
-  if (!replace) state.trail.push(state.screen);
+  generation++; pending = false; conceal(false); speak('');
+  if (screen === 'home') state.trail = [];
+  else if (screen === 'lobby') state.trail = ['home'];
+  else if (screen === 'round') state.trail = ['home', 'lobby'];
+  else if (!replace) state.trail.push(state.screen);
   state.screen = screen;
   scrollTo(0, 0); render({ animate: true });
 }
 function goBack() {
-  conceal(false); pending = false; generation++;
+  conceal(false); pending = false; generation++; speak('');
   state.screen = state.trail.pop() || (state.room ? 'lobby' : 'home');
   scrollTo(0, 0); render({ animate: true });
 }
 function conceal(update = true) {
   state.revealed = false;
+  if (!update) roleFocusPending = false;
   if (update && state.screen === 'round') {
     const card = document.querySelector('#role-card');
-    if (card) { card.className = 'group role-card'; card.innerHTML = roleContents(); }
+    if (card) {
+      roleFocusPending ||= card.contains(document.activeElement);
+      card.className = 'group role-card'; card.innerHTML = roleContents();
+      restoreRoleFocus();
+    }
   }
+}
+function restoreRoleFocus() {
+  if (!roleFocusPending || state.screen !== 'round' || document.hidden || !document.hasFocus()) return;
+  roleFocusPending = false;
+  document.querySelector('#role-card [data-action="reveal"]')?.focus({ preventScroll: true });
 }
 function bindScreen() {
   const search = document.querySelector('#location-search');
@@ -213,6 +234,7 @@ function bindScreen() {
       document.querySelector('#search-empty').hidden = total > 0;
       document.querySelector('#location-list').hidden = total === 0;
       clear.hidden = !search.value;
+      speak(total ? (query ? 'Найдено локаций: ' : 'Все локации: ') + total + '.' : 'Ничего не нашлось. Попробуй другое название.');
     };
     search.addEventListener('input', filter);
     clear.addEventListener('click', () => { search.value = ''; filter(); search.focus(); });
@@ -261,16 +283,14 @@ async function dispatch(action) {
   }
   if (action === 'resolve-invite') {
     state.joinValue = document.querySelector('#invite-input').value.trim();
-    const valid = /^https:\/\/t\.me\/[a-z0-9_]+\?start=room_[a-f0-9]{24}$/i.test(state.joinValue)
-      || state.joinValue.startsWith(location.origin + '/app.html?scenario=invitation');
-    if (!valid) {
+    if (!validInvite(state.joinValue, location.href)) {
       state.joinError = state.joinValue ? 'Нужна ссылка-приглашение из бота. Проверь, что она скопирована целиком.' : 'Вставь ссылку-приглашение.';
       render({ focus: false }); document.querySelector('#invite-input').focus(); return;
     }
     return go('invitation');
   }
   if (action === 'accept-invite') {
-    Object.assign(state, { room: true, owner: false, players: [...friends.slice(0, 3), me], round: 0, inRound: true, location: null });
+    Object.assign(state, { room: true, owner: false, players: [...friends.slice(0, 3), me], round: 0, inRound: true, location: null, deliveryFailed: false, spy: false, revealed: false });
     state.trail = ['home']; return go('lobby', { replace: true });
   }
   if (action === 'deal' || action === 'next') {
@@ -290,8 +310,9 @@ async function dispatch(action) {
     state.revealed = action === 'reveal';
     const card = document.querySelector('#role-card');
     card.className = `group role-card ${state.revealed ? 'is-open role-enter' : ''} ${state.revealed && state.spy ? 'role-spy' : ''}`;
-    card.innerHTML = roleContents(); card.querySelector('button')?.focus({ preventScroll: true }); haptic();
-    speak(state.revealed ? 'Карточка открыта.' : 'Карточка скрыта.'); return;
+    card.innerHTML = roleContents();
+    card.querySelector(state.revealed ? '#role-title' : 'button')?.focus({ preventScroll: true }); haptic();
+    speak(state.revealed ? '' : 'Карточка скрыта.'); return;
   }
   if (action === 'close' || action === 'leave') {
     const ok = await confirm(action === 'close' ? 'Закрыть комнату?' : 'Выйти из комнаты?', action === 'close' ? 'Все участники потеряют доступ к этой комнате. Чтобы сыграть снова, нужно будет создать новую.' : 'Ты исчезнешь из списка игроков. Вернуться можно по приглашению.', action === 'close' ? 'Закрыть' : 'Выйти', true);
@@ -304,27 +325,38 @@ async function dispatch(action) {
     await new Promise(resolve => setTimeout(resolve, 500)); target?.classList.remove('is-loading'); feedback('Состав комнаты обновлён.'); return;
   }
   if (action === 'copy-invite') {
-    const link = new URL('app.html?scenario=invitation', location.href).href;
+    const link = prototypeInviteUrl(location.href);
     const label = document.querySelector('#copy-invite-label');
     try { await navigator.clipboard.writeText(link); label.textContent = 'Приглашение скопировано'; feedback('Приглашение скопировано.'); }
     catch { const status = document.querySelector('#copy-status'); status.hidden = false; status.className = 'error'; status.textContent = 'Буфер недоступен. Выдели и скопируй ссылку ниже.'; const field = document.createElement('input'); field.value = link; field.readOnly = true; field.setAttribute('aria-label', 'Ссылка-приглашение'); field.className = 'invite-url'; status.after(field); field.focus(); field.select(); }
     return;
   }
-  if (action === 'retry') { state.deliveryFailed = false; render(); feedback('Неотправленные карточки отправлены повторно.'); }
+  if (action === 'retry') {
+    const version = generation;
+    pending = true; render({ focus: false });
+    await new Promise(resolve => setTimeout(resolve, 450));
+    if (generation !== version) return;
+    pending = false; state.deliveryFailed = false;
+    render(); feedback('Неотправленные карточки отправлены повторно. Роли не изменились.');
+  }
 }
 view.addEventListener('click', event => { const button = event.target.closest('button[data-action]'); if (button) void dispatch(button.dataset.action); });
 back.addEventListener('click', goBack);
 mainAction.addEventListener('click', () => { if (!mainAction.disabled && primary) void dispatch(primary); });
 if (telegram?.initData) {
   try { telegram.ready(); telegram.expand(); telegram.BackButton?.onClick(goBack); telegram.MainButton?.onClick(() => { if (!pending && primary && !mainAction.disabled) void dispatch(primary); }); } catch { /* Browser prototype remains available. */ }
-  if (telegram.isVersionAtLeast?.('8.0')) telegram.onEvent('deactivated', () => conceal());
+  if (telegram.isVersionAtLeast?.('8.0')) {
+    telegram.onEvent('deactivated', () => conceal());
+    telegram.onEvent('activated', restoreRoleFocus);
+  }
 }
-document.addEventListener('visibilitychange', () => { if (document.hidden) conceal(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) conceal(); else restoreRoleFocus(); });
 window.addEventListener('pagehide', () => conceal());
 window.addEventListener('blur', () => conceal());
+window.addEventListener('focus', restoreRoleFocus);
 
 function scenario(name) {
-  generation++; pending = false;
+  generation++; pending = false; roleFocusPending = false; speak('');
   Object.assign(state, { screen: 'home', trail: [], room: false, players: [me], owner: true, round: 0, inRound: true, revealed: false, location: null, spy: false, deliveryFailed: false });
   if (['waiting', 'ready', 'guest', 'round', 'spy', 'late', 'delivery'].includes(name)) {
     state.room = true; state.players = name === 'waiting' ? [me] : [me, ...friends.slice(0, 3)]; state.screen = 'lobby'; state.trail = ['home'];
