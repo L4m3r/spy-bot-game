@@ -96,11 +96,7 @@ html[data-action]:not([data-native-action]) main { padding-bottom: calc(7rem + v
 #action-bar { position: fixed; bottom: 0; left: 0; right: 0; z-index: 5; padding: 8px calc(8px + var(--safe-right)) calc(8px + var(--safe-bottom)) calc(8px + var(--safe-left)); background: var(--bg); }
 #main-action { max-width: 544px; margin: auto; }
 .role-card { text-align: center; padding: 24px 20px 12px; }
-.delivery-status { margin-bottom: 16px; padding: 16px; }
-.delivery-status p { margin: 4px 0 12px; color: var(--hint); font-size: .875rem; }
-.delivery-status .primary { margin-top: 12px; }
-.delivery-status .text-button { width: 100%; }
-.delivery-status h2 { font-size: 1rem; }
+.bot-delivery-note { margin-top: 16px; }
 .role-card .role-symbol { display: grid; place-items: center; width: 54px; height: 54px; margin: 0 auto 16px; border-radius: 50%; background: var(--soft); color: var(--link); }
 .role-symbol .icon { width: 29px; height: 29px; }
 .role-card h2 { font-size: 1.25rem; line-height: 1.3; }

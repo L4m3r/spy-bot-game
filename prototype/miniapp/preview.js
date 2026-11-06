@@ -22,7 +22,7 @@ window.addEventListener('message', event => {
   back.disabled = event.data.screen === 'home';
   back.querySelector('path').setAttribute('d', back.disabled ? 'm6 6 12 12M6 18 18 6' : 'M20 12H4m6-6-6 6 6 6');
   const current = event.data.screen === 'lobby' ? !event.data.owner ? 'guest' : event.data.players < 3 ? 'waiting' : 'ready'
-    : event.data.screen === 'round' ? !event.data.inRound ? 'late' : event.data.deliveryFailed ? 'delivery' : event.data.spy ? 'spy' : 'round'
+    : event.data.screen === 'round' ? !event.data.inRound ? 'late' : event.data.botDeliveryFailed ? 'delivery' : event.data.spy ? 'spy' : 'round'
     : event.data.screen;
   document.querySelectorAll('[data-scenario]').forEach(item => item.setAttribute('aria-pressed', String(item.dataset.scenario === current)));
   document.querySelector('#current-state').textContent = ({ home: 'Главная', lobby: 'Комната', round: 'Раунд ' + event.data.round, locations: 'Локации', rules: 'Правила', join: 'Вход в игру', invitation: 'Приглашение', invite: 'Поделиться приглашением', closed: 'Комната закрыта' })[event.data.screen] || 'Шпион';
