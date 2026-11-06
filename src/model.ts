@@ -10,11 +10,13 @@ export const LOCATIONS = [
 ] as const;
 
 export interface Player { id: number; name: string }
+export interface Member extends Player { membershipId: number }
 export interface Round {
   number: number;
   location: string;
   spyId: number;
   playerIds: number[];
+  membershipIds: Record<string, number>;
   delivery: Record<string, "pending" | "sent" | "failed">;
 }
 export interface Job {
@@ -22,6 +24,7 @@ export interface Job {
   version: number;
   kind: "lobby" | "card" | "notice";
   chatId: number;
+  membershipId?: number;
   newMessage?: boolean;
   roundNumber?: number;
   text?: string;
@@ -29,10 +32,15 @@ export interface Job {
   nextAt: number;
 }
 export interface RoomState {
+  schemaVersion: 2;
+  creationDeadline: number;
   code: string;
   username: string;
   ownerId: number;
-  members: Player[];
+  members: Member[];
+  // Completed or rejected entries are fenced until room expiry, independently
+  // of the bounded update cache. Delayed RPCs cannot undo these decisions.
+  membershipFences: Record<string, number>;
   expiresAt: number;
   round?: Round;
   processed: number[];
@@ -48,8 +56,10 @@ export interface Command {
   updateId: number;
   username: string;
   expectedRound?: number;
+  membershipId?: number;
+  validUntil?: number;
 }
-export interface Result { error?: string; message?: string }
+export interface Result { error?: string; message?: string; confirmCloseCode?: string }
 
 // Rejection sampling avoids modulo bias when choosing the spy and location.
 export function randomIndex(length: number): number {
@@ -66,15 +76,16 @@ export function enqueue(state: RoomState, job: Omit<Job, "version" | "attempts" 
 
 export function enqueueLobbies(state: RoomState): void {
   for (const player of state.members) {
-    enqueue(state, { id: `lobby:${player.id}`, kind: "lobby", chatId: player.id });
+    enqueue(state, { id: `lobby:${player.id}`, kind: "lobby", chatId: player.id, membershipId: player.membershipId });
   }
 }
 
 export function enqueueCard(state: RoomState, id: number): void {
   const round = state.round!;
+  if (!state.members.some(player => player.id === id && player.membershipId === round.membershipIds[id])) return;
   round.delivery[id] = "pending";
   enqueue(state, {
-    id: `card:${round.number}:${id}`, kind: "card", chatId: id, roundNumber: round.number,
+    id: `card:${round.number}:${id}`, kind: "card", chatId: id, roundNumber: round.number, membershipId: round.membershipIds[id],
     text: id === round.spyId
       ? `Раунд ${round.number}\n\n🕵️ Ты — шпион.\nВыясни, где находятся остальные.\n\nОбсуждение и обвинения — голосом.`
       : `Раунд ${round.number}\n\n📍 Локация: ${round.location}\nТы не шпион.\n\nНайди шпиона, не выдав локацию слишком явно.`,
