@@ -22,7 +22,7 @@ export async function api(path, body) {
   }
   return data;
 }
-export function actionRequest(action, code, expectedRound) {
+export function actionRequest(action, code, expectedRound, membershipVersion) {
   sequence = Math.max(Date.now() + clockOffset, sequence + 1);
-  return { action, code, expectedRound, requestId: sequence + ':' + crypto.randomUUID() };
+  return { action, code, expectedRound, membershipVersion, requestId: sequence + ':' + crypto.randomUUID() };
 }

@@ -27,6 +27,7 @@ interface LimitsState {
   lastMiniAppResult?: Result;
   miniAppActions?: number[];
   membershipSequence?: number;
+  lastMiniAppMembershipAt?: number;
 }
 
 export class UserLimits extends DurableObject<Env> {
@@ -168,6 +169,29 @@ export class UserLimits extends DurableObject<Env> {
     state.lastRequestAt = Date.now();
 
     const active = state.active;
+    if (active && command.expectedMembershipId !== undefined && command.expectedMembershipId !== active.membershipId) {
+      await this.save(state);
+      return { error: "Это действие от предыдущего участия. Открой текущую комнату заново." };
+    }
+    const changesMembership = command.action === "join" || command.action === "leave" || command.action === "close"
+      || (command.action === "create" && !active);
+    if (command.channel !== "miniapp" && changesMembership && state.lastMiniAppMembershipAt
+      && command.expectedMembershipId === undefined) {
+      // Telegram text dates have second precision. The transition's entire
+      // second is ambiguous: reject it rather than mutate a newer membership.
+      const staleText = command.messageDate !== undefined && command.messageDate <= Math.floor(state.lastMiniAppMembershipAt / 1000);
+      const staleButton = command.messageDate === undefined
+        && (command.buttonCreatedAt === undefined || command.buttonCreatedAt <= state.lastMiniAppMembershipAt);
+      if (staleText || staleButton) {
+        await this.save(state);
+        return { error: "Комната уже изменилась через Mini App. Повтори команду или открой текущую комнату через /game." };
+      }
+    }
+    if (command.channel !== "miniapp" && ["leave", "close", "deal", "retry", "confirm"].includes(command.action)
+      && command.messageDate === undefined && command.expectedMembershipId === undefined) {
+      await this.save(state);
+      return { error: "Эта кнопка устарела. Нажми «Обновить» или отправь /game." };
+    }
     if (command.action === "create" || command.action === "join") {
       if (active) {
         if (command.action === "join" && command.code !== active.code) {
@@ -197,6 +221,7 @@ export class UserLimits extends DurableObject<Env> {
         code: command.code, expiresAt: validUntil, owner: command.action === "create", membershipId,
         pending: { ...command, membershipId, validUntil },
       };
+      if (command.channel === "miniapp") state.lastMiniAppMembershipAt = Date.now();
       await this.save(state);
       return this.finishEntry(state);
     }
@@ -208,7 +233,7 @@ export class UserLimits extends DurableObject<Env> {
     const routed = { ...command, code: active.code, membershipId: active.membershipId };
     if (command.action === "leave" && active.owner) {
       await this.save(state);
-      return { message: "Ты организатор. Чтобы выйти, нужно закрыть комнату для всех. Закрыть?", confirmCloseCode: active.code };
+      return { message: "Ты организатор. Чтобы выйти, нужно закрыть комнату для всех. Закрыть?", confirmCloseCode: active.code, confirmMembershipId: active.membershipId };
     }
     if (command.action === "close" && !active.owner) {
       await this.save(state);
@@ -217,6 +242,7 @@ export class UserLimits extends DurableObject<Env> {
     if (command.action === "leave" || command.action === "close") {
       if (command.action === "leave") active.leaving = routed;
       else active.closing = routed;
+      if (command.channel === "miniapp") state.lastMiniAppMembershipAt = Date.now();
       await this.save(state);
       return this.finishExit(state);
     }
@@ -224,7 +250,7 @@ export class UserLimits extends DurableObject<Env> {
     // can be retried. The room deduplicates its own effects.
     const result = await rpcData(this.env.ROOMS.getByName(active.code).dispatch(routed));
     await this.save(state);
-    return result;
+    return command.action === "confirm" && !result.error ? { ...result, confirmMembershipId: active.membershipId } : result;
   }
 
   async miniAppState(userId: number): Promise<MiniAppRoom | null> {

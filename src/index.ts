@@ -12,7 +12,7 @@ async function makeBot(env: Env, miniAppUrl: string) {
   const identity = await getIdentity(env.BOT_TOKEN);
   const bot = new Bot(env.BOT_TOKEN, { botInfo: identity, client: { timeoutSeconds: 15 } });
   const welcome = "🕵️ Шпион\n\nСоздай комнату и отправь друзьям приглашение. Когда соберётся от 3 до 12 игроков, раздай карточки.\n\nВсе обсуждения, обвинения и угадывание локации — голосом.\n\n/game — текущая или новая комната\n/leave — выйти из комнаты\n/locations — список возможных локаций";
-  const createKeyboard = () => new InlineKeyboard().webApp("Открыть Mini App", miniAppUrl).row().text("Создать игру", "create");
+  const createKeyboard = () => new InlineKeyboard().webApp("Открыть Mini App", miniAppUrl).row().text("Создать игру", `create:${Date.now()}`);
 
   bot.use(async (ctx, next) => {
     if (ctx.chat?.type !== "private") {
@@ -23,10 +23,10 @@ async function makeBot(env: Env, miniAppUrl: string) {
     return next();
   });
 
-  async function dispatch(ctx: Context, action: Action, code: string, expectedRound?: number) {
+  async function dispatch(ctx: Context, action: Action, code: string, expectedRound?: number, expectedMembershipId?: number, buttonCreatedAt?: number) {
     if (!ctx.from) return;
     const command: Command = {
-      action, code, expectedRound, updateId: ctx.update.update_id,
+      action, code, expectedRound, expectedMembershipId, buttonCreatedAt, messageDate: ctx.message?.date, updateId: ctx.update.update_id,
       actor: { id: ctx.from.id, name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ").replace(/[\r\n]/g, " ").slice(0, 48) },
       username: identity.username!,
       miniAppUrl,
@@ -34,7 +34,7 @@ async function makeBot(env: Env, miniAppUrl: string) {
     const result = await rpcData(env.USER_LIMITS.getByName(String(ctx.from.id)).dispatch(command));
     if (result.error || result.message) {
       await ctx.reply(result.error ?? result.message!, result.confirmCloseCode ? {
-        reply_markup: new InlineKeyboard().text("Да, закрыть комнату", `close:${result.confirmCloseCode}`).row().text("Остаться в комнате", `show:${result.confirmCloseCode}`),
+        reply_markup: new InlineKeyboard().text("Да, закрыть комнату", `close:${result.confirmCloseCode}:0:${result.confirmMembershipId}`).row().text("Остаться в комнате", `show:${result.confirmCloseCode}:0:${result.confirmMembershipId}`),
       } : undefined);
     }
     return result;
@@ -56,11 +56,11 @@ async function makeBot(env: Env, miniAppUrl: string) {
     await ctx.answerCallbackQuery();
     await ctx.reply(`Возможные локации (общий список для всех):\n\n${LOCATIONS.join("\n")}`);
   });
-  bot.callbackQuery("create", async ctx => {
+  bot.callbackQuery(/^create(?::([0-9]{13}))?$/, async ctx => {
     await ctx.answerCallbackQuery();
-    await dispatch(ctx, "create", await roomCode(env.WEBHOOK_SECRET, ctx.from.id, ctx.update.update_id));
+    await dispatch(ctx, "create", await roomCode(env.WEBHOOK_SECRET, ctx.from.id, ctx.update.update_id), undefined, undefined, ctx.match[1] ? Number(ctx.match[1]) : undefined);
   });
-  bot.callbackQuery(/^(refresh|show|leave|deal|retry|confirm|close):([a-f0-9]{24})(?::([0-9]{1,9}))?$/, async ctx => {
+  bot.callbackQuery(/^(refresh|show|leave|deal|retry|confirm|close):([a-f0-9]{24})(?::([0-9]{1,9}))?(?::([0-9]{1,16}))?$/, async ctx => {
     // Acknowledge the button immediately; card delivery is done by the room alarm.
     try { await ctx.answerCallbackQuery(); } catch { /* Expired callbacks may still carry a valid room action. */ }
     const message = ctx.callbackQuery.message;
@@ -69,10 +69,12 @@ async function makeBot(env: Env, miniAppUrl: string) {
     const action: Action = ctx.match[1] === "refresh" && oldRoomPrompt ? "show" : ctx.match[1] as Action;
     const code = ctx.match[2];
     const expectedRound = ctx.match[3] === undefined ? undefined : Number(ctx.match[3]);
-    const result = await dispatch(ctx, action, code, expectedRound);
+    const expectedMembershipId = ctx.match[4] === undefined ? undefined : Number(ctx.match[4]);
+    if (expectedMembershipId !== undefined && !Number.isSafeInteger(expectedMembershipId)) return;
+    const result = await dispatch(ctx, action, code, expectedRound, expectedMembershipId);
     if (action === "confirm" && result && !result.error) {
       await ctx.reply("Закончить текущий раунд и раздать новые карточки?", {
-        reply_markup: new InlineKeyboard().text("Да, новый раунд", `deal:${code}:${expectedRound}`).row().text("Вернуться в комнату", `refresh:${code}`),
+        reply_markup: new InlineKeyboard().text("Да, новый раунд", `deal:${code}:${expectedRound}:${result.confirmMembershipId}`).row().text("Вернуться в комнату", `refresh:${code}:0:${result.confirmMembershipId}`),
       });
     }
   });

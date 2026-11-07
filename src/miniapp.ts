@@ -84,10 +84,14 @@ export async function miniAppFetch(request: Request, env: Env): Promise<Response
     if (requestAt < Date.now() - 300_000 || requestAt > Date.now() + 30_000) return json({ error: "Действие устарело. Обнови комнату." }, 409);
     if (body.action !== "create" && (typeof body.code !== "string" || !/^[a-f0-9]{24}$/.test(body.code))) return json({ error: "Приглашение недействительно." }, 400);
     if (body.action === "deal" && (!Number.isSafeInteger(body.expectedRound) || body.expectedRound < 0)) return json({ error: "Обнови текущий раунд." }, 400);
+    if (["deal", "leave", "close"].includes(body.action) && (!Number.isSafeInteger(body.membershipVersion) || body.membershipVersion < 1)) {
+      return json({ error: "Обнови приложение: закрой и снова открой Mini App." }, 409);
+    }
     const identity = await getIdentity(env.BOT_TOKEN);
     const result = await rpcData(user.dispatch({
       actor, username: identity.username!, action: body.action, code: body.action === "create" ? await roomCode(env.WEBHOOK_SECRET, actor.id, requestAt) : body.code,
       updateId: requestAt, requestId: body.requestId, channel: "miniapp", expectedRound: body.expectedRound,
+      expectedMembershipId: ["deal", "leave", "close"].includes(body.action) ? body.membershipVersion : undefined,
       miniAppUrl: new URL("/miniapp/", request.url).href,
     }));
     if (result.error) return json({ error: result.error }, 409);

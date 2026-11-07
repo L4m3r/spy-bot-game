@@ -211,7 +211,7 @@ export class GameRoom extends DurableObject<Env> {
       const round = state.round;
       // Explicit public DTO: never return the durable room or private roles.
       return {
-        code: state.code, ownerId: state.ownerId, round: round?.number ?? 0, expiresAt: state.expiresAt,
+        code: state.code, membershipVersion: membershipId, ownerId: state.ownerId, round: round?.number ?? 0, expiresAt: state.expiresAt,
         players: state.members.map(player => ({ id: player.id, name: player.name,
           inRound: !!round && round.membershipIds[player.id] === player.membershipId })),
         botDeliveryFailed: !!round && state.members.some(player => round.membershipIds[player.id] === player.membershipId && round.delivery[player.id] === "failed"),

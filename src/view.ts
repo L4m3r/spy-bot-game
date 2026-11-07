@@ -25,19 +25,21 @@ export function lobbyView(state: RoomState, userId: number) {
     }
     else status += "\nМожно играть! Обсуждение и обвинения — голосом.";
   }
+  const membershipId = state.members.find(player => player.id === userId)?.membershipId;
+  const callback = (action: string, number = 0) => `${action}:${state.code}:${number}:${membershipId}`;
   const keyboard = new InlineKeyboard();
   if (state.miniAppUrl) keyboard.webApp("Открыть Mini App", `${state.miniAppUrl}?room=${state.code}`).row();
   if (owner) {
     keyboard.url("Пригласить друзей", `https://t.me/share/url?url=${encodeURIComponent(invite)}&text=${encodeURIComponent("Присоединяйся к игре «Шпион»")}`).row();
     if (!cardJobsPending(state)) {
       if (round && Object.values(round.delivery).includes("failed")) {
-        keyboard.text("Повторить неотправленные", `retry:${state.code}:${round.number}`).row();
+        keyboard.text("Повторить неотправленные", callback("retry", round.number)).row();
       }
-      keyboard.text(round ? "Следующий раунд" : "Раздать карточки", `${round ? "confirm" : "deal"}:${state.code}:${round?.number ?? 0}`).row();
+      keyboard.text(round ? "Следующий раунд" : "Раздать карточки", callback(round ? "confirm" : "deal", round?.number ?? 0)).row();
     }
   }
-  keyboard.text("Обновить", `refresh:${state.code}`).text("Локации", "locations").row();
-  keyboard.text(owner ? "Закрыть комнату" : "Выйти", `${owner ? "close" : "leave"}:${state.code}`);
+  keyboard.text("Обновить", callback("refresh")).text("Локации", "locations").row();
+  keyboard.text(owner ? "Закрыть комнату" : "Выйти", callback(owner ? "close" : "leave"));
   return {
     text: `🕵️ Комната «Шпион»\n\nИгроки: ${state.members.length}/${MAX_PLAYERS}\n${players}\n\n${status}\n\nПриглашение:\n${invite}\n\nКомната удалится через 24 часа после последнего действия в ней.`,
     reply_markup: keyboard,
