@@ -1,10 +1,11 @@
+import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, writeFile, copyFile, rm } from 'node:fs/promises';
 import { build } from 'esbuild';
 const source = new URL('../web/', import.meta.url);
 const output = new URL('../dist/miniapp/', import.meta.url);
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
-await build({ entryPoints: [new URL('app.js', source).pathname], outfile: new URL('app.js', output).pathname,
+await build({ entryPoints: [fileURLToPath(new URL('app.js', source))], outfile: fileURLToPath(new URL('app.js', output)),
   bundle: true, format: 'esm', target: 'es2022', define: { __SPY_PREVIEW__: 'false' }, minify: true, charset: 'utf8' });
 await copyFile(new URL('index.html', source), new URL('index.html', output));
 await copyFile(new URL('app.css', source), new URL('app.css', output));

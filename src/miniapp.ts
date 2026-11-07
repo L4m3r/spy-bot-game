@@ -46,7 +46,8 @@ export async function miniAppFetch(request: Request, env: Env): Promise<Response
     const user = env.USER_LIMITS.getByName(String(actor.id));
     if (route === "state") {
       const identity = await getIdentity(env.BOT_TOKEN);
-      return json({ user: actor, botUsername: identity.username, locations: LOCATIONS, serverTime: Date.now(), room: await rpcData(user.miniAppState(actor.id)) });
+      const context = await rpcData(user.miniAppContext(actor.id));
+      return json({ user: actor, botUsername: identity.username, locations: LOCATIONS, serverTime: Date.now(), ...context });
     }
     const code = url.searchParams.get("code") ?? "";
     if (route === "invitation" || route === "card") {
@@ -84,22 +85,31 @@ export async function miniAppFetch(request: Request, env: Env): Promise<Response
     if (requestAt < Date.now() - 300_000 || requestAt > Date.now() + 30_000) return json({ error: "Действие устарело. Обнови комнату." }, 409);
     if (body.action !== "create" && (typeof body.code !== "string" || !/^[a-f0-9]{24}$/.test(body.code))) return json({ error: "Приглашение недействительно." }, 400);
     if (body.action === "deal" && (!Number.isSafeInteger(body.expectedRound) || body.expectedRound < 0)) return json({ error: "Обнови текущий раунд." }, 400);
+    if (["deal", "leave", "close"].includes(body.action) && (!Number.isSafeInteger(body.membershipVersion) || body.membershipVersion < 1)) {
+      return json({ error: "Обнови приложение: закрой и снова открой Mini App." }, 409);
+    }
+    if (["create", "join"].includes(body.action) && (!Number.isSafeInteger(body.contextVersion) || body.contextVersion < 0)) {
+      return json({ error: "Обнови приложение: закрой и снова открой Mini App." }, 409);
+    }
     const identity = await getIdentity(env.BOT_TOKEN);
     const result = await rpcData(user.dispatch({
       actor, username: identity.username!, action: body.action, code: body.action === "create" ? await roomCode(env.WEBHOOK_SECRET, actor.id, requestAt) : body.code,
       updateId: requestAt, requestId: body.requestId, channel: "miniapp", expectedRound: body.expectedRound,
+      expectedMembershipId: ["deal", "leave", "close"].includes(body.action) ? body.membershipVersion : undefined,
+      expectedContextVersion: ["create", "join"].includes(body.action) ? body.contextVersion : undefined,
       miniAppUrl: new URL("/miniapp/", request.url).href,
     }));
     if (result.error) return json({ error: result.error }, 409);
     if (result.confirmCloseCode) return json({ error: "Организатор должен закрыть комнату для всех участников." }, 409);
-    const room = await rpcData(user.miniAppState(actor.id));
+    const context = await rpcData(user.miniAppContext(actor.id));
+    const { room } = context;
     // A lost response can leave an incomplete operation without a cached
     // result. Reconcile the actual room instead of reporting phantom success.
     if ((body.action === "create" && !room) || (body.action === "join" && room?.code !== body.code)
       || (body.action === "deal" && (!room || room.code !== body.code || room.round <= body.expectedRound))) {
       return json({ error: "Действие не завершено. Обнови комнату и попробуй ещё раз." }, 409);
     }
-    return json({ room, message: result.message });
+    return json({ ...context, message: result.message });
   } catch {
     // Do not log signed initData, bot tokens, private cards or RPC errors.
     return json({ error: "Не удалось связаться с сервером. Попробуй ещё раз." }, 503);

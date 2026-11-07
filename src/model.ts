@@ -12,6 +12,7 @@ export const LOCATIONS = [
 export interface Player { id: number; name: string }
 export interface MiniAppRoom {
   code: string;
+  membershipVersion: number;
   ownerId: number;
   round: number;
   expiresAt: number;
@@ -66,6 +67,12 @@ export interface Command {
   updateId: number;
   username: string;
   expectedRound?: number;
+  expectedMembershipId?: number;
+  expectedContextVersion?: number;
+  messageDate?: number;
+  buttonCreatedAt?: number;
+  // Internal generation of Telegram update IDs; Mini App traffic never renews it.
+  botEpoch?: string;
   membershipId?: number;
   validUntil?: number;
   // Only the authenticated Mini App HTTP handler supplies these fields.
@@ -73,7 +80,7 @@ export interface Command {
   channel?: "miniapp";
   miniAppUrl?: string;
 }
-export interface Result { error?: string; message?: string; confirmCloseCode?: string }
+export interface Result { error?: string; message?: string; confirmCloseCode?: string; confirmMembershipId?: number }
 
 // Rejection sampling avoids modulo bias when choosing the spy and location.
 export function randomIndex(length: number): number {
