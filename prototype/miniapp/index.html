@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Шпион — прототип Mini App</title>
+  <style>
+    :root { font: 15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:#e8edf3; background:#111820; }
+    * { box-sizing:border-box; } body { margin:0; } button,select { font:inherit; } button { cursor:pointer; }
+    .layout { max-width:1100px; margin:0 auto; padding:40px 28px; display:grid; grid-template-columns:280px minmax(0,1fr); gap:72px; align-items:start; }
+    .eyebrow { font-size:12px; color:#7ca7cb; letter-spacing:.08em; text-transform:uppercase; margin:0 0 8px; }
+    aside { max-height:calc(100svh - 80px); overflow:auto; padding-right:8px; scrollbar-width:thin; }
+    h1 { margin:0; font-size:30px; font-weight:650; letter-spacing:-.5px; } .intro { color:#9caab8; margin:8px 0 24px; font-size:14px; }
+    h2 { color:#899aab; font-size:12px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; margin:24px 0 10px; }
+    .scenarios { display:grid; gap:3px; }
+    .scenarios button { display:flex; align-items:center; justify-content:space-between; width:100%; min-height:38px; padding:8px 12px; border:0; border-radius:7px; color:#bac6d2; background:transparent; text-align:left; font-size:14px; }
+    .scenarios button[aria-pressed="true"] { color:#74bcf4; background:#1d3042; }
+    .scenarios button:hover { background:#202c38; }
+    .theme { display:flex; gap:5px; } .theme button { flex:1; padding:7px 6px; border:1px solid #344351; color:#bac6d2; background:transparent; border-radius:7px; font-size:13px; }
+    .theme button[aria-pressed="true"] { color:#8ecdf9; border-color:#508ebc; background:#1b2e3e; }
+    .options { display:grid; gap:10px; color:#bac6d2; font-size:13px; } .options label { display:flex; gap:9px; align-items:center; } input { accent-color:#5ca9e1; }
+    #add-player { width:100%; min-height:40px; margin-top:18px; background:#263d50; color:#a5d8ff; border:1px solid #3a607b; border-radius:8px; font-size:14px; }
+    #add-player:disabled { opacity:.4; cursor:default; }
+    .caption { color:#7f90a0; font-size:12px; margin:18px 0 0; }
+    .preview { justify-self:start; width:416px; max-width:100%; }
+    .frame { border:1px solid #36414c; border-radius:18px; overflow:hidden; background:#1b2329; box-shadow:0 16px 64px #0003; }
+    .chrome { height:52px; padding:0 16px; display:flex; align-items:center; gap:12px; color:#edf3f8; background:#1b2329; font-size:15px; }
+    .chrome svg { width:19px; height:19px; stroke:currentColor; stroke-width:1.7; fill:none; } .chrome strong { font-weight:600; } .chrome .more { margin-left:auto; letter-spacing:2px; }
+    #host-back { display:grid;place-items:center;min-width:44px;min-height:44px;margin-left:-10px;padding:0;border:0;background:transparent;color:inherit; } #host-back:disabled { cursor:default; }
+    iframe { border:0; width:100%; height:clamp(480px,calc(100svh - 164px),800px); display:block; background:#1b2329; }
+    .preview.is-small { width:322px; }
+    .preview.is-light .chrome { background:#fff; color:#111; }
+    .state { display:flex; justify-content:space-between; color:#718496; font-size:12px; margin:12px 3px 0; }
+    .state a { color:#8db8d9; text-decoration:none; }
+    @media(max-width:760px) { .layout { padding:20px 14px; display:flex; flex-direction:column-reverse; gap:32px; align-items:center; } aside { width:100%; max-width:416px; max-height:none; overflow:visible; padding-right:0; } .preview { width:416px; } iframe { height:calc(100svh - 130px); min-height:540px; max-height:760px; } .scenarios { grid-template-columns:1fr 1fr; } .intro { max-width:350px; } }
+    @media(prefers-reduced-motion:no-preference) { .preview { transition:width .15s ease; } }
+  </style>
+  <script src="preview.js" type="module"></script>
+</head>
+<body>
+  <div class="layout">
+    <aside>
+      <p class="eyebrow">Mini App · Концепция 01</p><h1>Шпион</h1>
+      <p class="intro">Комната для компании.<br>Карточка только для тебя.</p>
+      <button id="add-player" disabled>Добавить игрока в комнату</button>
+      <h2>Сценарии</h2>
+      <nav class="scenarios" aria-label="Сценарии прототипа">
+        <button data-scenario="home" aria-pressed="true">Главная <span>01</span></button>
+        <button data-scenario="waiting" aria-pressed="false">Ждём друзей <span>02</span></button>
+        <button data-scenario="ready" aria-pressed="false">Можно раздавать <span>03</span></button>
+        <button data-scenario="guest" aria-pressed="false">Я — участник <span>04</span></button>
+        <button data-scenario="round" aria-pressed="false">Личная карточка <span>05</span></button>
+        <button data-scenario="spy" aria-pressed="false">Я — шпион <span>06</span></button>
+        <button data-scenario="late" aria-pressed="false">Вход после раздачи <span>07</span></button>
+        <button data-scenario="invitation" aria-pressed="false">По приглашению <span>08</span></button>
+        <button data-scenario="locations" aria-pressed="false">Все локации <span>09</span></button>
+        <button data-scenario="rules" aria-pressed="false">Как играть <span>10</span></button>
+        <button data-scenario="closed" aria-pressed="false">Комната закрыта <span>11</span></button>
+        <button data-scenario="delivery" aria-pressed="false">Сбой сообщения бота <span>12</span></button>
+      </nav>
+      <h2>Тема Telegram</h2>
+      <div class="theme" aria-label="Тема предпросмотра"><button data-theme="light" aria-pressed="false">Светлая</button><button data-theme="dark" aria-pressed="true">Тёмная</button></div>
+      <h2>Проверка размеров</h2>
+      <div class="options"><label><input id="small" type="checkbox">Узкий экран · 320 px</label><label><input id="large-text" type="checkbox">Увеличенный текст · 125%</label><label><input id="safe" type="checkbox">Системные отступы · 70 px</label></div>
+      <p class="caption">Интерактивный прототип. Участники и комнаты вымышленные. Сообщения в Telegram не отправляются. Эти переключатели не входят в интерфейс приложения.</p>
+    </aside>
+    <section id="preview" class="preview" aria-label="Предпросмотр приложения">
+      <div class="frame"><div class="chrome"><button id="host-back" type="button" aria-label="Назад в приложении" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg></button><strong>Шпион</strong><span class="more" aria-hidden="true">•••</span></div><iframe title="Шпион Mini App" src="app.html?theme=dark&amp;host=preview"></iframe></div>
+      <div class="state"><span id="current-state">Главная</span><a href="app.html?theme=dark" target="_blank" rel="noopener">Открыть отдельно ↗</a></div>
+    </section>
+  </div>
+</body>
+</html>

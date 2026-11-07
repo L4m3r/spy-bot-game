@@ -10,6 +10,15 @@ export const LOCATIONS = [
 ] as const;
 
 export interface Player { id: number; name: string }
+export interface MiniAppRoom {
+  code: string;
+  ownerId: number;
+  round: number;
+  expiresAt: number;
+  players: Array<Player & { inRound: boolean }>;
+  botDeliveryFailed: boolean;
+}
+export interface MiniAppCard { round: number; role: "spy" | "civilian"; location?: string }
 export interface Member extends Player { membershipId: number }
 export interface Round {
   number: number;
@@ -32,6 +41,7 @@ export interface Job {
   nextAt: number;
 }
 export interface RoomState {
+  miniAppUrl?: string;
   schemaVersion: 2;
   creationDeadline: number;
   code: string;
@@ -43,7 +53,7 @@ export interface RoomState {
   membershipFences: Record<string, number>;
   expiresAt: number;
   round?: Round;
-  processed: number[];
+  processed: Array<number | string>;
   lobbyMessages: Record<string, number>;
   jobs: Job[];
   jobSequence: number;
@@ -58,6 +68,10 @@ export interface Command {
   expectedRound?: number;
   membershipId?: number;
   validUntil?: number;
+  // Only the authenticated Mini App HTTP handler supplies these fields.
+  requestId?: string;
+  channel?: "miniapp";
+  miniAppUrl?: string;
 }
 export interface Result { error?: string; message?: string; confirmCloseCode?: string }
 

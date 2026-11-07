@@ -6,6 +6,10 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "observability": { "enabled": false },
+  "assets": {
+    "directory": "./dist",
+    "run_worker_first": ["/api/*", "/webhook", "/health"]
+  },
   "durable_objects": {
     "bindings": [
       { "name": "ROOMS", "class_name": "GameRoom" },

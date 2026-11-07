@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env";
-import { ROOM_TTL_MS, type Command, type Result } from "./model";
+import { ROOM_TTL_MS, type Command, type Result, type MiniAppRoom, type MiniAppCard } from "./model";
 import { rpcData } from "./rpc";
 
 export const CREATION_WINDOW_MS = 60 * 60 * 1000;
@@ -22,6 +22,11 @@ interface LimitsState {
   lastUpdateId: number;
   lastRequestAt: number;
   recoveryAttempts?: number;
+  lastMiniAppRequestAt?: number;
+  lastMiniAppRequestId?: string;
+  lastMiniAppResult?: Result;
+  miniAppActions?: number[];
+  membershipSequence?: number;
 }
 
 export class UserLimits extends DurableObject<Env> {
@@ -127,72 +132,119 @@ export class UserLimits extends DurableObject<Env> {
 
   async dispatch(command: Command): Promise<Result> {
     return this.serial(async () => {
-      const state = await this.ctx.storage.get<LimitsState>("limits") ?? {
-        ownerId: command.actor.id, creations: [], lastUpdateId: -1, lastRequestAt: Date.now(),
-      };
-      if (state.ownerId !== command.actor.id) throw new Error("UserLimits owner mismatch");
-      this.prune(state);
-      await this.recover(state);
-      // Delayed Telegram retries must not join again, leave a newer membership,
-      // or recreate a room after the original operation has finished.
-      if (command.updateId <= state.lastUpdateId) return {};
-      state.lastUpdateId = command.updateId;
-      state.lastRequestAt = Date.now();
-
-      const active = state.active;
-      if (command.action === "create" || command.action === "join") {
-        if (active) {
-          if (command.action === "join" && command.code !== active.code) {
-            await this.save(state);
-            return { error: "Ты уже в другой комнате. /game — показать её, /leave — выйти перед вступлением в новую." };
-          }
-          // /game is a recovery entry point for hosts AND guests. Always send
-          // a fresh lobby instead of relying on an earlier Telegram message.
-          const result = await rpcData(this.env.ROOMS.getByName(active.code).dispatch({ ...command, code: active.code, action: "show", membershipId: active.membershipId }));
-          await this.save(state);
-          return result;
+      const result = await this.dispatchLocked(command);
+      if (command.channel === "miniapp") {
+        const latest = await this.ctx.storage.get<LimitsState>("limits");
+        if (latest && latest.lastMiniAppRequestId === command.requestId) {
+          latest.lastMiniAppResult = result;
+          await this.save(latest);
         }
-        if (command.action === "create") {
-          if (state.creations.length >= MAX_CREATIONS) {
-            const minutes = Math.max(1, Math.ceil((state.creations[0] + CREATION_WINDOW_MS - Date.now()) / 60_000));
-            await this.save(state);
-            return { error: `Можно создать максимум ${MAX_CREATIONS} новых комнат за час. Попробуй через ${minutes} мин.` };
-          }
-          state.creations.push(Date.now());
-        }
-        const validUntil = Date.now() + ROOM_TTL_MS;
-        state.active = {
-          code: command.code, expiresAt: validUntil, owner: command.action === "create", membershipId: command.updateId,
-          pending: { ...command, membershipId: command.updateId, validUntil },
-        };
-        await this.save(state);
-        return this.finishEntry(state);
       }
-
-      if (!active || (command.code && command.code !== active.code)) {
-        await this.save(state);
-        return { error: command.code ? "Ты не в этой комнате. Подключись по приглашению." : "У тебя нет активной комнаты. /game — создать игру." };
-      }
-      const routed = { ...command, code: active.code, membershipId: active.membershipId };
-      if (command.action === "leave" && active.owner) {
-        await this.save(state);
-        return { message: "Ты организатор. Чтобы выйти, нужно закрыть комнату для всех. Закрыть?", confirmCloseCode: active.code };
-      }
-      if (command.action === "close" && !active.owner) {
-        await this.save(state);
-        return { error: "Это действие доступно только организатору." };
-      }
-      if (command.action === "leave" || command.action === "close") {
-        if (command.action === "leave") active.leaving = routed;
-        else active.closing = routed;
-        await this.save(state);
-        return this.finishExit(state);
-      }
-      // Save the watermark after the room response so a failed normal action
-      // can be retried. The room deduplicates its own effects.
-      const result = await rpcData(this.env.ROOMS.getByName(active.code).dispatch(routed));
-      await this.save(state);
       return result;
+    });
+  }
+
+  private async dispatchLocked(command: Command): Promise<Result> {
+    const state = await this.ctx.storage.get<LimitsState>("limits") ?? {
+      ownerId: command.actor.id, creations: [], lastUpdateId: -1, lastRequestAt: Date.now(),
+    };
+    if (state.ownerId !== command.actor.id) throw new Error("UserLimits owner mismatch");
+    this.prune(state);
+    await this.recover(state);
+    // Delayed Telegram retries must not join again, leave a newer membership,
+    // or recreate a room after the original operation has finished.
+    const watermark = command.channel === "miniapp" ? state.lastMiniAppRequestAt ?? -1 : state.lastUpdateId;
+    if (command.updateId <= watermark) return command.channel === "miniapp" && command.requestId !== state.lastMiniAppRequestId
+      ? { error: "Действие устарело. Обнови комнату и попробуй ещё раз." } : command.channel === "miniapp" ? state.lastMiniAppResult ?? {} : {};
+    if (command.channel === "miniapp") {
+      state.miniAppActions = (state.miniAppActions ?? []).filter(time => time > Date.now() - 60_000);
+      if (state.miniAppActions.length >= 30) return { error: "Слишком много действий. Подожди минуту." };
+      state.miniAppActions.push(Date.now());
+      state.lastMiniAppRequestAt = command.updateId;
+      state.lastMiniAppRequestId = command.requestId;
+      state.lastMiniAppResult = undefined;
+    }
+    else state.lastUpdateId = command.updateId;
+    state.lastRequestAt = Date.now();
+
+    const active = state.active;
+    if (command.action === "create" || command.action === "join") {
+      if (active) {
+        if (command.action === "join" && command.code !== active.code) {
+          await this.save(state);
+          return { error: "Ты уже в другой комнате. /game — показать её, /leave — выйти перед вступлением в новую." };
+        }
+        // /game is a recovery entry point for hosts AND guests. Always send
+        // a fresh lobby instead of relying on an earlier Telegram message.
+        const result = await rpcData(this.env.ROOMS.getByName(active.code).dispatch({ ...command, code: active.code, action: "show", membershipId: active.membershipId }));
+        await this.save(state);
+        return result;
+      }
+      if (command.action === "create") {
+        if (state.creations.length >= MAX_CREATIONS) {
+          const minutes = Math.max(1, Math.ceil((state.creations[0] + CREATION_WINDOW_MS - Date.now()) / 60_000));
+          await this.save(state);
+          return { error: `Можно создать максимум ${MAX_CREATIONS} новых комнат за час. Попробуй через ${minutes} мин.` };
+        }
+        state.creations.push(Date.now());
+      }
+      const validUntil = Date.now() + ROOM_TTL_MS;
+      // Membership fences must remain monotonic across bot and Mini App
+      // operations, including after the user's old index was cleaned up.
+      const membershipId = Math.max(Date.now() * 1000, (state.membershipSequence ?? 0) + 1);
+      state.membershipSequence = membershipId;
+      state.active = {
+        code: command.code, expiresAt: validUntil, owner: command.action === "create", membershipId,
+        pending: { ...command, membershipId, validUntil },
+      };
+      await this.save(state);
+      return this.finishEntry(state);
+    }
+
+    if (!active || (command.code && command.code !== active.code)) {
+      await this.save(state);
+      return { error: command.code ? "Ты не в этой комнате. Подключись по приглашению." : "У тебя нет активной комнаты. /game — создать игру." };
+    }
+    const routed = { ...command, code: active.code, membershipId: active.membershipId };
+    if (command.action === "leave" && active.owner) {
+      await this.save(state);
+      return { message: "Ты организатор. Чтобы выйти, нужно закрыть комнату для всех. Закрыть?", confirmCloseCode: active.code };
+    }
+    if (command.action === "close" && !active.owner) {
+      await this.save(state);
+      return { error: "Это действие доступно только организатору." };
+    }
+    if (command.action === "leave" || command.action === "close") {
+      if (command.action === "leave") active.leaving = routed;
+      else active.closing = routed;
+      await this.save(state);
+      return this.finishExit(state);
+    }
+    // Save the watermark after the room response so a failed normal action
+    // can be retried. The room deduplicates its own effects.
+    const result = await rpcData(this.env.ROOMS.getByName(active.code).dispatch(routed));
+    await this.save(state);
+    return result;
+  }
+
+  async miniAppState(userId: number): Promise<MiniAppRoom | null> {
+    return this.serial(async () => {
+      const state = await this.ctx.storage.get<LimitsState>("limits");
+      if (!state) return null;
+      if (state.ownerId !== userId) throw new Error("UserLimits owner mismatch");
+      await this.recover(state);
+      const active = state.active;
+      return active ? rpcData(this.env.ROOMS.getByName(active.code).miniAppState(userId, active.membershipId)) : null;
+    });
+  }
+
+  async miniAppCard(userId: number, code: string, round: number): Promise<MiniAppCard | null> {
+    return this.serial(async () => {
+      const state = await this.ctx.storage.get<LimitsState>("limits");
+      if (!state || state.ownerId !== userId) return null;
+      await this.recover(state);
+      const active = state.active;
+      return active?.code === code ? rpcData(this.env.ROOMS.getByName(code).miniAppCard(userId, active.membershipId, round)) : null;
     });
   }
 

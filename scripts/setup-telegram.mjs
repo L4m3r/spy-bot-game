@@ -45,6 +45,9 @@ try {
   });
   if (!probe.ok) throw new Error("Deployed secrets do not match or Worker is not configured");
   const identity = await telegram("getMe");
+  const app = await fetch(new URL("/miniapp/", url), { signal: AbortSignal.timeout(20_000) });
+  if (!app.ok || !app.headers.get("content-type")?.includes("text/html")) throw new Error("Mini App is unavailable");
+  await telegram("setChatMenuButton", { menu_button: { type: "web_app", text: "Открыть игру", web_app: { url: new URL("/miniapp/", url).href } } });
   await telegram("setMyCommands", { commands: [
     { command: "game", description: "Открыть или создать комнату" },
     { command: "leave", description: "Выйти из текущей комнаты" },
@@ -65,6 +68,6 @@ try {
 } catch (error) {
   console.error("Настройка не завершена. Проверь адрес Worker, секреты в .dev.vars и Cloudflare и доступность Telegram API.");
   // Only our own controlled messages are safe to show.
-  if (error instanceof Error && /^(Telegram \w+ failed|Worker is unavailable|Deployed secrets do not match or Worker is not configured|Webhook verification failed)$/.test(error.message)) console.error(error.message);
+  if (error instanceof Error && /^(Telegram \w+ failed|Worker is unavailable|Mini App is unavailable|Deployed secrets do not match or Worker is not configured|Webhook verification failed)$/.test(error.message)) console.error(error.message);
   process.exitCode = 1;
 }
