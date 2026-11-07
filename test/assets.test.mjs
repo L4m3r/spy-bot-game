@@ -24,20 +24,32 @@ test('public root opens the Mini App through the production assets router', asyn
   });
   t.after(() => mf.dispose());
   const origin = 'https://spy.example';
-  for (const query of ['', '?room=' + 'a'.repeat(24) + '&tgWebAppStartParam=room_test']) {
-    const response = await mf.dispatchFetch(origin + '/' + query, { redirect: 'manual' });
-    assert.equal(response.status, 302);
-    assert.equal(new URL(response.headers.get('Location'), origin).href, origin + '/miniapp/' + query);
-    const page = await mf.dispatchFetch(new URL(response.headers.get('Location'), origin));
+  let entryHtml;
+  for (const path of ['/', '/miniapp/']) for (const query of ['', '?room=' + 'a'.repeat(24) + '&tgWebAppStartParam=room_test']) {
+    const page = await mf.dispatchFetch(origin + path + query, { redirect: 'manual' });
     assert.equal(page.status, 200);
+    assert.equal(page.headers.get('Location'), null, 'Entry URLs must not add a redirect request');
     assert.match(page.headers.get('Content-Type'), /text\/html/);
+    assert.equal(page.headers.get('Cache-Control'), 'no-cache');
+    assert.equal(page.headers.get('Referrer-Policy'), 'no-referrer');
+    assert.equal(page.headers.get('X-Content-Type-Options'), 'nosniff');
+    assert.match(page.headers.get('Content-Security-Policy'), /script-src 'self' https:\/\/telegram.org/);
     const html = await page.text();
     assert.match(html, /id="view"/);
-    for (const asset of ['app.js', 'app.css']) {
-      const file = await mf.dispatchFetch(new URL(asset, origin + '/miniapp/'));
+    entryHtml ??= html;
+    assert.equal(html, entryHtml, 'Both paths serve the same application');
+    const resources = [...html.matchAll(/(?:src|href)="([^"]+\.(?:js|css))"/g)]
+      .map(match => new URL(match[1], origin + path + query)).filter(url => url.origin === origin);
+    assert.equal(resources.length, 2);
+    for (const url of resources) {
+      const file = await mf.dispatchFetch(url, { redirect: 'manual' });
       assert.equal(file.status, 200);
-      assert.match(file.headers.get('Content-Type'), asset.endsWith('.js') ? /javascript/ : /text\/css/);
+      assert.match(file.headers.get('Content-Type'), url.pathname.endsWith('.js') ? /javascript/ : /text\/css/);
     }
+    const head = await mf.dispatchFetch(origin + path + query, { method: 'HEAD', redirect: 'manual' });
+    assert.equal(head.status, 200);
+    assert.equal(head.headers.get('Location'), null);
+    assert.equal(await head.text(), '');
   }
   assert.equal((await mf.dispatchFetch(origin + '/api/miniapp/state')).status, 401);
   assert.equal((await mf.dispatchFetch(origin + '/webhook', { method: 'POST' })).status, 401);
