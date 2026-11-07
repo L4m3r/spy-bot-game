@@ -23,7 +23,7 @@ const mf = new Miniflare({ modules: true, script: bundle.outputFiles[0].text,
     return Response.json(response, { status:response.ok ? 200 : 403 });
   },
 });
-const staticFiles = new Map([['/miniapp/',['index.html','text/html']],['/miniapp/app.js',['app.js','text/javascript']],['/miniapp/app.css',['app.css','text/css']]]);
+const staticFiles = new Map([['/',['index.html','text/html']],['/miniapp/',['index.html','text/html']],['/miniapp/app.js',['app.js','text/javascript']],['/miniapp/app.css',['app.css','text/css']]]);
 const server = createServer(async (request,response) => {
   try {
     const url = new URL(request.url, 'http://127.0.0.1:8795');
@@ -49,5 +49,5 @@ const server = createServer(async (request,response) => {
     response.writeHead(200,{'Content-Type':entry[1]+'; charset=utf-8','Cache-Control':'no-store'});response.end(body);
   } catch {response.writeHead(500);response.end('Local fixture failed');}
 });
-server.listen(8795,'127.0.0.1',()=>console.log('Local fixture (fictional users, mocked Telegram): http://127.0.0.1:8795/miniapp/?test_user=1'));
+server.listen(8795,'127.0.0.1',()=>console.log('Local fixture (fictional users, mocked Telegram): http://127.0.0.1:8795/?test_user=1'));
 process.on('SIGINT',async()=>{server.close();await mf.dispose();process.exit(0);});

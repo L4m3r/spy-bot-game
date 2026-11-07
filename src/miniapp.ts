@@ -97,7 +97,7 @@ export async function miniAppFetch(request: Request, env: Env): Promise<Response
       updateId: requestAt, requestId: body.requestId, channel: "miniapp", expectedRound: body.expectedRound,
       expectedMembershipId: ["deal", "leave", "close"].includes(body.action) ? body.membershipVersion : undefined,
       expectedContextVersion: ["create", "join"].includes(body.action) ? body.contextVersion : undefined,
-      miniAppUrl: new URL("/miniapp/", request.url).href,
+      miniAppUrl: new URL("/", request.url).href,
     }));
     if (result.error) return json({ error: result.error }, 409);
     if (result.confirmCloseCode) return json({ error: "Организатор должен закрыть комнату для всех участников." }, 409);

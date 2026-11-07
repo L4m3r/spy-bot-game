@@ -126,7 +126,7 @@ export default {
     } catch { return new Response("Invalid update", { status: 400 }); }
     if (!("message" in update) && !("callback_query" in update)) return new Response("OK");
     try {
-      const bot = await makeBot(env, new URL("/miniapp/", request.url).href);
+      const bot = await makeBot(env, new URL("/", request.url).href);
       await bot.handleUpdate(update);
       return new Response("OK");
     } catch {
