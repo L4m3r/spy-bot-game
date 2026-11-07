@@ -13,3 +13,13 @@ export function validInvite(value, baseHref) {
     && /^\/[A-Za-z0-9_]+$/.test(url.pathname)
     && /^room_[a-f0-9]{24}$/.test(url.searchParams.get('start') || '');
 }
+
+export function roomFromInvite(value, botUsername) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.hostname !== 't.me' || url.port || url.username || url.password || url.hash
+      || url.pathname.toLowerCase() !== '/' + botUsername.toLowerCase()) return null;
+    const match = /^room_([a-f0-9]{24})$/.exec(url.searchParams.get('start') || url.searchParams.get('startapp') || '');
+    return match?.[1] ?? null;
+  } catch { return null; }
+}

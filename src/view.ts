@@ -26,6 +26,7 @@ export function lobbyView(state: RoomState, userId: number) {
     else status += "\nМожно играть! Обсуждение и обвинения — голосом.";
   }
   const keyboard = new InlineKeyboard();
+  if (state.miniAppUrl) keyboard.webApp("Открыть Mini App", `${state.miniAppUrl}?room=${state.code}`).row();
   if (owner) {
     keyboard.url("Пригласить друзей", `https://t.me/share/url?url=${encodeURIComponent(invite)}&text=${encodeURIComponent("Присоединяйся к игре «Шпион»")}`).row();
     if (!cardJobsPending(state)) {

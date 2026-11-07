@@ -1,33 +1,18 @@
-import { Api, Bot, InlineKeyboard, type Context } from "grammy";
-import type { Update, UserFromGetMe } from "grammy/types";
+import { Bot, InlineKeyboard, type Context } from "grammy";
+import type { Update } from "grammy/types";
 import type { Env } from "./env";
 import { LOCATIONS, type Action, type Command } from "./model";
 import { rpcData } from "./rpc";
+import { getIdentity, roomCode } from "./identity";
+import { miniAppFetch } from "./miniapp";
 export { GameRoom } from "./room";
 export { UserLimits } from "./user-limits";
 
-let botIdentity: { token: string; promise: Promise<UserFromGetMe> } | undefined;
-
-async function getIdentity(token: string): Promise<UserFromGetMe> {
-  if (!botIdentity || botIdentity.token !== token) {
-    botIdentity = { token, promise: new Api(token, { timeoutSeconds: 15 }).getMe() };
-  }
-  try { return await botIdentity.promise; }
-  catch (error) { botIdentity = undefined; throw error; }
-}
-
-async function roomCode(secret: string, userId: number, updateId: number): Promise<string> {
-  // Stable across Telegram retries, unpredictable without the server secret.
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const digest = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${userId}:${updateId}`));
-  return Array.from(new Uint8Array(digest).slice(0, 12), byte => byte.toString(16).padStart(2, "0")).join("");
-}
-
-async function makeBot(env: Env) {
+async function makeBot(env: Env, miniAppUrl: string) {
   const identity = await getIdentity(env.BOT_TOKEN);
   const bot = new Bot(env.BOT_TOKEN, { botInfo: identity, client: { timeoutSeconds: 15 } });
   const welcome = "🕵️ Шпион\n\nСоздай комнату и отправь друзьям приглашение. Когда соберётся от 3 до 12 игроков, раздай карточки.\n\nВсе обсуждения, обвинения и угадывание локации — голосом.\n\n/game — текущая или новая комната\n/leave — выйти из комнаты\n/locations — список возможных локаций";
-  const createKeyboard = () => new InlineKeyboard().text("Создать игру", "create");
+  const createKeyboard = () => new InlineKeyboard().webApp("Открыть Mini App", miniAppUrl).row().text("Создать игру", "create");
 
   bot.use(async (ctx, next) => {
     if (ctx.chat?.type !== "private") {
@@ -44,6 +29,7 @@ async function makeBot(env: Env) {
       action, code, expectedRound, updateId: ctx.update.update_id,
       actor: { id: ctx.from.id, name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ").replace(/[\r\n]/g, " ").slice(0, 48) },
       username: identity.username!,
+      miniAppUrl,
     };
     const result = await rpcData(env.USER_LIMITS.getByName(String(ctx.from.id)).dispatch(command));
     if (result.error || result.message) {
@@ -106,6 +92,7 @@ function equalSecret(actual: string, expected: string): boolean {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const path = new URL(request.url).pathname;
+    if (path.startsWith("/api/miniapp/")) return miniAppFetch(request, env);
     if (path === "/health" && request.method === "GET") return Response.json({ ok: true });
     if (path !== "/webhook") return new Response("Not found", { status: 404 });
     if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
@@ -137,7 +124,7 @@ export default {
     } catch { return new Response("Invalid update", { status: 400 }); }
     if (!("message" in update) && !("callback_query" in update)) return new Response("OK");
     try {
-      const bot = await makeBot(env);
+      const bot = await makeBot(env, new URL("/miniapp/", request.url).href);
       await bot.handleUpdate(update);
       return new Response("OK");
     } catch {

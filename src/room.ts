@@ -4,7 +4,7 @@ import type { Env } from "./env";
 import {
   cardJobsPending, enqueue, enqueueCard, enqueueLobbies, LOCATIONS,
   MAX_PLAYERS, MIN_PLAYERS, randomIndex, ROOM_TTL_MS,
-  type Command, type Job, type Result, type RoomState,
+  type Command, type Job, type Result, type RoomState, type MiniAppRoom, type MiniAppCard,
 } from "./model";
 import { lobbyView } from "./view";
 
@@ -89,6 +89,7 @@ export class GameRoom extends DurableObject<Env> {
         created = true;
       }
       const owner = command.actor.id === state.ownerId;
+      if (command.miniAppUrl) state.miniAppUrl = command.miniAppUrl;
       const currentMember = state.members.find(player => player.id === command.actor.id);
       const member = currentMember?.membershipId === command.membershipId && command.membershipId !== undefined;
       if (["deal", "retry", "confirm", "close", "create"].includes(command.action) && !owner) {
@@ -121,7 +122,8 @@ export class GameRoom extends DurableObject<Env> {
       } else if (!member) {
         return { error: "Ты не в этой комнате. Подключись по приглашению." };
       }
-      if (state.processed.includes(command.updateId)) return {};
+      const operationId = command.requestId ? `app:${command.actor.id}:${command.requestId}` : command.updateId;
+      if (state.processed.includes(operationId)) return {};
       const roundNumber = state.round?.number ?? 0;
       if (["deal", "retry", "confirm"].includes(command.action) && command.expectedRound !== roundNumber) {
         return { error: "Эта кнопка от старого раунда. Нажми «Обновить» в комнате." };
@@ -153,11 +155,14 @@ export class GameRoom extends DurableObject<Env> {
           break;
         case "confirm":
           if (!state.round) return { error: "Сначала раздай карточки первого раунда." };
-          if (cardJobsPending(state)) return { error: "Дождись завершения текущей раздачи." };
+          if (command.channel !== "miniapp" && cardJobsPending(state)) return { error: "Дождись завершения текущей раздачи." };
           break;
         case "deal": {
-          if (cardJobsPending(state)) return { error: "Дождись завершения текущей раздачи." };
+          if (command.channel !== "miniapp" && cardJobsPending(state)) return { error: "Дождись завершения текущей раздачи." };
           if (state.members.length < MIN_PLAYERS) return { error: `Нужно хотя бы ${MIN_PLAYERS} игрока.` };
+          // An app round does not wait for optional chat notifications. Drop
+          // unsent cards from older rounds; an in-flight send names its round.
+          state.jobs = state.jobs.filter(job => job.kind !== "card");
           const locations = LOCATIONS.filter(location => location !== state.round?.location);
           state.round = {
             number: roundNumber + 1, location: locations[randomIndex(locations.length)],
@@ -183,9 +188,46 @@ export class GameRoom extends DurableObject<Env> {
           return { message: "Комната закрыта. Для новой игры отправь /game." };
       }
       state.expiresAt = now + ROOM_TTL_MS;
-      state.processed = [...state.processed.slice(-255), command.updateId];
+      state.processed = [...state.processed.slice(-255), operationId];
       await this.save(state);
       return {};
+    });
+  }
+
+  async miniAppInvitation() {
+    return this.locked(async state => {
+      if (!state || state.expiresAt <= Date.now()) return null;
+      return {
+        code: state.code, ownerName: state.members.find(player => player.id === state.ownerId)?.name ?? "Организатор",
+        players: state.members.map(player => ({ id: player.id, name: player.name })),
+        full: state.members.length >= MAX_PLAYERS, round: state.round?.number ?? 0,
+      };
+    });
+  }
+
+  async miniAppState(userId: number, membershipId: number): Promise<MiniAppRoom | null> {
+    return this.locked(async state => {
+      if (!state || state.expiresAt <= Date.now() || !state.members.some(player => player.id === userId && player.membershipId === membershipId)) return null;
+      const round = state.round;
+      // Explicit public DTO: never return the durable room or private roles.
+      return {
+        code: state.code, ownerId: state.ownerId, round: round?.number ?? 0, expiresAt: state.expiresAt,
+        players: state.members.map(player => ({ id: player.id, name: player.name,
+          inRound: !!round && round.membershipIds[player.id] === player.membershipId })),
+        botDeliveryFailed: !!round && state.members.some(player => round.membershipIds[player.id] === player.membershipId && round.delivery[player.id] === "failed"),
+      };
+    });
+  }
+
+  async miniAppCard(userId: number, membershipId: number, expectedRound: number): Promise<MiniAppCard | null> {
+    return this.locked(async state => {
+      const round = state?.round;
+      if (!state || state.expiresAt <= Date.now() || !round || round.number !== expectedRound
+        || !state.members.some(player => player.id === userId && player.membershipId === membershipId)
+        || round.membershipIds[userId] !== membershipId) return null;
+      return userId === round.spyId
+        ? { round: round.number, role: "spy" as const }
+        : { round: round.number, role: "civilian" as const, location: round.location };
     });
   }
 

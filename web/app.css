@@ -52,6 +52,7 @@ html[data-action]:not([data-native-action]) main { padding-bottom: calc(7rem + v
 .screen-title { margin: 4px 14px 20px; }
 .screen-title p { margin-top: 6px; font-size: .875rem; color: var(--hint); }
 .group { overflow: hidden; border-radius: 8px; background: var(--surface); }
+.loading-placeholder { height: 160px; opacity: .6; }
 .section { margin-top: 24px; }
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 24px; margin: 0 14px 10px; }
 .section-heading h2 { display: flex; align-items: baseline; flex-wrap: wrap; gap: 7px; }

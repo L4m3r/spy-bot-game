@@ -690,7 +690,7 @@ for (const fault of ["before", "after"]) {
     const recovered = await limits.get("limits");
     assert.equal(recovered.active.code, room.code);
     assert.equal(recovered.active.pending, undefined);
-    assert.equal(recovered.active.membershipId, invite.update_id);
+    assert.equal(recovered.active.membershipId, pending.active.membershipId);
     assert.equal(recovered.creations.length, 0);
     assert.equal((await room.state()).members.filter(player => player.id === 2).length, 1);
     await f.send(invite);
@@ -989,4 +989,134 @@ test("a guest's cleanup alarm follows room activity and eventually releases the 
   assert.equal(await room.state(), undefined);
   await f.send(f.message(2, "/leave"));
   assert(f.requests.some(request => request.chat_id === 2 && request.text?.includes("нет активной комнаты")));
+});
+
+function signedMiniAppData(id, { authDate = Math.floor(Date.now() / 1000), firstName = `Игрок ${id}` } = {}) {
+  const params = new URLSearchParams({ auth_date: String(authDate), user: JSON.stringify({ id, first_name: firstName }) });
+  const data = [...params.entries()].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, value]) => `${key}=${value}`).join('\n');
+  const secret = createHmac('sha256', 'WebAppData').update('999:test-only-token').digest();
+  params.set('hash', createHmac('sha256', secret).update(data).digest('hex'));
+  return params.toString();
+}
+let appClock = 0;
+function appAction(action, code, expectedRound) {
+  appClock = Math.max(Date.now(), appClock + 1);
+  return { action, code, expectedRound, requestId: `${appClock}:${crypto.randomUUID()}` };
+}
+async function miniApp(f, id, path, body, { initData = signedMiniAppData(id), origin = 'https://bot.test', method, raw } = {}) {
+  const response = await f.mf.dispatchFetch('https://bot.test/api/miniapp/' + path, {
+    method: method ?? (body || raw ? 'POST' : 'GET'), headers: { Authorization: 'tma ' + initData, Origin: origin, 'Content-Type': 'application/json' },
+    body: raw ?? (body ? JSON.stringify(body) : undefined),
+  });
+  return { status: response.status, headers: response.headers, data: await response.json() };
+}
+function assertPublicRoom(room) {
+  const text = JSON.stringify(room);
+  for (const key of ['spyId', 'location', 'membershipId', 'membershipIds', 'jobs', 'delivery', 'text', 'role']) assert(!text.includes(`"${key}"`), key + ' leaked into public room');
+}
+
+test('Mini App authentication rejects tampering, stale dates, duplicate fields and cross-origin writes', async t => {
+  const f = await fixture(t);
+  assert.equal((await miniApp(f, 1, 'state', undefined, { initData: '' })).status, 401);
+  const valid = signedMiniAppData(1);
+  const tampered = new URLSearchParams(valid); tampered.set('user', JSON.stringify({ id: 2, first_name: 'Fake' }));
+  assert.equal((await miniApp(f, 1, 'state', undefined, { initData: tampered.toString() })).status, 401);
+  for (const authDate of [Math.floor(Date.now() / 1000) - 3601, Math.floor(Date.now() / 1000) + 60]) {
+    assert.equal((await miniApp(f, 1, 'state', undefined, { initData: signedMiniAppData(1, { authDate }) })).status, 401);
+  }
+  assert.equal((await miniApp(f, 1, 'state', undefined, { initData: valid + '&auth_date=1' })).status, 401);
+  assert.equal((await miniApp(f, 1, 'action', appAction('create'), { origin: 'https://evil.test' })).status, 403);
+  assert.equal((await miniApp(f, 1, 'state', {}, { method: 'POST' })).status, 405);
+  assert.equal((await miniApp(f, 1, 'action', undefined, { raw: 'x'.repeat(4097) })).status, 413);
+  assert.equal(f.requests.length, 0);
+  const empty = await miniApp(f, 1, 'state');
+  assert.equal(empty.status, 200); assert.equal(empty.data.room, null); assert.equal(empty.data.user.id, 1);
+  assert.equal(empty.headers.get('cache-control'), 'no-store');
+});
+
+test('Mini App shares bot rooms, exposes only the callers card and preserves round idempotency', async t => {
+  const f = await fixture(t);
+  const create = appAction('create');
+  const opened = await miniApp(f, 1, 'action', { ...create, actor: { id: 9999 }, userId: 9999 });
+  assert.equal(opened.status, 200); const code = opened.data.room.code;
+  assert.equal(opened.data.room.ownerId, 1); assertPublicRoom(opened.data.room);
+  assert.equal((await miniApp(f, 2, 'invitation?code=' + code)).data.invitation.players.length, 1);
+  assert.equal((await miniApp(f, 2, 'action', appAction('join', code))).status, 200);
+  await f.join(code, 3);
+  const deal = appAction('deal', code, 0);
+  const dealt = await miniApp(f, 1, 'action', deal);
+  assert.equal(dealt.status, 200); assert.equal(dealt.data.room.round, 1); assertPublicRoom(dealt.data.room);
+  assert.equal((await miniApp(f, 1, 'action', deal)).data.room.round, 1);
+  assert.equal((await miniApp(f, 2, 'action', appAction('deal', code, 1))).status, 409);
+  const cards = [];
+  for (const id of [1, 2, 3]) {
+    const card = await miniApp(f, id, `card?code=${code}&round=1&userId=9999`);
+    assert.equal(card.status, 200); cards.push(card.data.card);
+  }
+  assert.equal(cards.filter(card => card.role === 'spy').length, 1);
+  assert.equal(cards.find(card => card.role === 'spy').location, undefined);
+  assert.equal(new Set(cards.filter(card => card.role === 'civilian').map(card => card.location)).size, 1);
+  assert.equal((await miniApp(f, 4, `card?code=${code}&round=1`)).status, 409);
+  const storage = await f.objectStorage('ROOMS', code); const before = await storage.get('room');
+  await miniApp(f, 1, 'state'); await miniApp(f, 1, `card?code=${code}&round=1`);
+  assert.equal((await storage.get('room')).expiresAt, before.expiresAt);
+  assert.equal((await miniApp(f, 2, 'action', appAction('leave', code))).status, 200);
+  assert.equal((await miniApp(f, 2, `card?code=${code}&round=1`)).status, 409);
+  await f.join(code, 2);
+  assert.equal((await miniApp(f, 2, `card?code=${code}&round=1`)).status, 409);
+  assert.equal((await miniApp(f, 1, 'action', appAction('deal', code, 1))).data.room.round, 2);
+  assert.equal((await miniApp(f, 1, `card?code=${code}&round=1`)).status, 409);
+  assert.equal((await miniApp(f, 2, `card?code=${code}&round=2`)).status, 200);
+  assertPublicRoom((await miniApp(f, 1, 'state')).data.room);
+});
+
+test('Mini App card reads and new rounds do not wait for Telegram notifications', async t => {
+  const f = await fixture(t);
+  const room = await f.create(); await f.join(room.code, 2); await f.join(room.code, 3);
+  f.failCards.add(2);
+  assert.equal((await miniApp(f, 1, 'action', appAction('deal', room.code, 0))).status, 200);
+  await until(async () => (await room.state()).round.delivery[2] === 'failed');
+  assert.equal((await miniApp(f, 2, `card?code=${room.code}&round=1`)).status, 200);
+  const state = await room.state();
+  state.jobs.push({ id: 'card:1:2', kind: 'card', chatId: 2, roundNumber: 1, membershipId: state.round.membershipIds[2], text: 'Round 1', attempts: 1, version: ++state.jobSequence, nextAt: Date.now() + 60_000 });
+  await room.storage.put('room', state);
+  const next = await miniApp(f, 1, 'action', appAction('deal', room.code, 1));
+  assert.equal(next.status, 200); assert.equal(next.data.room.round, 2);
+  assert(!(await room.state()).jobs.some(job => job.kind === 'card' && job.roundNumber === 1));
+});
+
+test('Mini App cannot replace another membership and bot commands retain their own watermark', async t => {
+  const f = await fixture(t);
+  const host = await miniApp(f, 1, 'action', appAction('create')); const code = host.data.room.code;
+  await miniApp(f, 2, 'action', appAction('join', code));
+  const other = await miniApp(f, 3, 'action', appAction('create'));
+  assert.equal((await miniApp(f, 2, 'action', appAction('join', other.data.room.code))).status, 409);
+  assert.equal((await miniApp(f, 2, 'state')).data.room.code, code);
+  assert.equal((await miniApp(f, 2, 'action', appAction('close', code))).status, 409);
+  const old = await (await f.objectStorage('USER_LIMITS', 1)).get('limits');
+  assert.equal((await miniApp(f, 1, 'action', appAction('close', code))).status, 200);
+  await f.send(f.message(1, '/game'));
+  const current = await (await f.objectStorage('USER_LIMITS', 1)).get('limits');
+  assert(current.active); assert.notEqual(current.active.code, code); assert(current.active.membershipId > old.active.membershipId);
+  assert.equal((await miniApp(f, 1, 'action', appAction('close', code))).status, 409);
+  const expired = { ...appAction('close', current.active.code), requestId: `${Date.now() - 301_000}:${crypto.randomUUID()}` };
+  assert.equal((await miniApp(f, 1, 'action', expired)).status, 409);
+  assert.equal((await miniApp(f, 2, 'state')).data.room, null);
+});
+
+test('Mini App replays errors as errors and cannot manufacture a completed deal', async t => {
+  const f = await fixture(t);
+  const { data } = await miniApp(f, 1, 'action', appAction('create'));
+  const code = data.room.code;
+  const deal = appAction('deal', code, 0);
+  const failed = await miniApp(f, 1, 'action', deal);
+  const replayed = await miniApp(f, 1, 'action', deal);
+  assert.equal(failed.status, 409); assert.equal(replayed.status, 409); assert.deepEqual(replayed.data, failed.data);
+  const limits = await f.objectStorage('USER_LIMITS', 1);
+  const state = await limits.get('limits'); delete state.lastMiniAppResult;
+  await limits.put('limits', state);
+  assert.equal((await miniApp(f, 1, 'action', deal)).status, 409);
+  assert.equal((await miniApp(f, 1, 'state')).data.room.round, 0);
+  assert.equal((await miniApp(f, 1, 'action', appAction('leave', code))).status, 409);
+  assert.equal((await miniApp(f, 1, 'state')).data.room.code, code);
 });
