@@ -2,9 +2,14 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env";
 import { ROOM_TTL_MS, type Command, type Result, type MiniAppRoom, type MiniAppCard } from "./model";
 import { rpcData } from "./rpc";
+import { roomCode } from "./identity";
 
 export const CREATION_WINDOW_MS = 60 * 60 * 1000;
 export const MAX_CREATIONS = 10;
+// Telegram retains undelivered updates for at most 24 hours, and may restart
+// its numeric sequence after a week without updates. Keep ordering within the
+// delivery window, without letting Mini App activity keep a bot epoch forever.
+export const BOT_DEDUP_TTL_MS = 24 * 60 * 60 * 1000;
 
 interface ActiveRoom {
   code: string;
@@ -28,6 +33,9 @@ interface LimitsState {
   miniAppActions?: number[];
   membershipSequence?: number;
   lastMiniAppMembershipAt?: number;
+  lastBotRequestAt?: number;
+  botEpoch?: string;
+  lastBotResult?: Result;
 }
 
 export class UserLimits extends DurableObject<Env> {
@@ -150,13 +158,38 @@ export class UserLimits extends DurableObject<Env> {
       ownerId: command.actor.id, creations: [], lastUpdateId: -1, lastRequestAt: Date.now(),
     };
     if (state.ownerId !== command.actor.id) throw new Error("UserLimits owner mismatch");
+    // Freeze the legacy fallback before any Mini App request can advance
+    // lastRequestAt. App traffic must not keep an old bot watermark alive.
+    state.lastBotRequestAt ??= state.lastRequestAt;
     this.prune(state);
     await this.recover(state);
+    if (command.channel !== "miniapp") {
+      // Legacy indexes have no separate bot timestamp. Start conservatively
+      // from their latest request; subsequent app requests never advance it.
+      const lastBotRequestAt = state.lastBotRequestAt;
+      let epochChanged = false;
+      if (Date.now() - lastBotRequestAt > BOT_DEDUP_TTL_MS) {
+        state.lastUpdateId = -1;
+        state.botEpoch = undefined;
+        state.lastBotResult = undefined;
+        epochChanged = true;
+      }
+      if (!state.botEpoch) { state.botEpoch = crypto.randomUUID(); epochChanged = true; }
+      // A failed normal RPC leaves its watermark retryable. Persist both the
+      // generation and its latest arrival before that RPC, so a retry crossing
+      // the old idle deadline cannot bypass the room's dedup in a new epoch.
+      if (epochChanged || command.updateId > state.lastUpdateId) {
+        state.lastBotRequestAt = Date.now();
+        await this.save(state);
+      }
+      command = { ...command, botEpoch: state.botEpoch };
+    }
     // Delayed Telegram retries must not join again, leave a newer membership,
     // or recreate a room after the original operation has finished.
     const watermark = command.channel === "miniapp" ? state.lastMiniAppRequestAt ?? -1 : state.lastUpdateId;
     if (command.updateId <= watermark) return command.channel === "miniapp" && command.requestId !== state.lastMiniAppRequestId
-      ? { error: "Действие устарело. Обнови комнату и попробуй ещё раз." } : command.channel === "miniapp" ? state.lastMiniAppResult ?? {} : {};
+      ? { error: "Действие устарело. Обнови комнату и попробуй ещё раз." } : command.channel === "miniapp" ? state.lastMiniAppResult ?? {}
+        : command.updateId === state.lastUpdateId ? state.lastBotResult ?? {} : {};
     if (command.channel === "miniapp") {
       state.miniAppActions = (state.miniAppActions ?? []).filter(time => time > Date.now() - 60_000);
       if (state.miniAppActions.length >= 30) return { error: "Слишком много действий. Подожди минуту." };
@@ -165,10 +198,18 @@ export class UserLimits extends DurableObject<Env> {
       state.lastMiniAppRequestId = command.requestId;
       state.lastMiniAppResult = undefined;
     }
-    else state.lastUpdateId = command.updateId;
+    else {
+      state.lastUpdateId = command.updateId;
+      state.lastBotResult = undefined;
+    }
     state.lastRequestAt = Date.now();
 
     const active = state.active;
+    if (command.channel === "miniapp" && ["create", "join"].includes(command.action)
+      && command.expectedContextVersion !== undefined && command.expectedContextVersion !== (state.membershipSequence ?? 0)) {
+      await this.save(state);
+      return { error: "Участие уже изменилось. Обнови приложение и попробуй ещё раз." };
+    }
     if (active && command.expectedMembershipId !== undefined && command.expectedMembershipId !== active.membershipId) {
       await this.save(state);
       return { error: "Это действие от предыдущего участия. Открой текущую комнату заново." };
@@ -211,6 +252,9 @@ export class UserLimits extends DurableObject<Env> {
           return { error: `Можно создать максимум ${MAX_CREATIONS} новых комнат за час. Попробуй через ${minutes} мин.` };
         }
         state.creations.push(Date.now());
+        if (command.channel !== "miniapp") {
+          command = { ...command, code: await roomCode(this.env.WEBHOOK_SECRET, command.actor.id, command.updateId, state.botEpoch) };
+        }
       }
       const validUntil = Date.now() + ROOM_TTL_MS;
       // Membership fences must remain monotonic across bot and Mini App
@@ -232,8 +276,10 @@ export class UserLimits extends DurableObject<Env> {
     }
     const routed = { ...command, code: active.code, membershipId: active.membershipId };
     if (command.action === "leave" && active.owner) {
+      const result = { message: "Ты организатор. Чтобы выйти, нужно закрыть комнату для всех. Закрыть?", confirmCloseCode: active.code, confirmMembershipId: active.membershipId };
+      if (command.channel !== "miniapp") state.lastBotResult = result;
       await this.save(state);
-      return { message: "Ты организатор. Чтобы выйти, нужно закрыть комнату для всех. Закрыть?", confirmCloseCode: active.code, confirmMembershipId: active.membershipId };
+      return result;
     }
     if (command.action === "close" && !active.owner) {
       await this.save(state);
@@ -248,19 +294,29 @@ export class UserLimits extends DurableObject<Env> {
     }
     // Save the watermark after the room response so a failed normal action
     // can be retried. The room deduplicates its own effects.
-    const result = await rpcData(this.env.ROOMS.getByName(active.code).dispatch(routed));
+    let result = await rpcData(this.env.ROOMS.getByName(active.code).dispatch(routed));
+    if (command.action === "confirm" && !result.error) result = { ...result, confirmMembershipId: active.membershipId };
+    // Confirmation delivery happens after this RPC returns. Persist its exact
+    // context with the watermark so a webhook retry can send a working prompt.
+    if (command.channel !== "miniapp") state.lastBotResult = result;
     await this.save(state);
-    return command.action === "confirm" && !result.error ? { ...result, confirmMembershipId: active.membershipId } : result;
+    return result;
   }
 
   async miniAppState(userId: number): Promise<MiniAppRoom | null> {
+    return (await this.miniAppContext(userId)).room;
+  }
+
+  async miniAppContext(userId: number): Promise<{ room: MiniAppRoom | null; contextVersion: number }> {
     return this.serial(async () => {
       const state = await this.ctx.storage.get<LimitsState>("limits");
-      if (!state) return null;
+      if (!state) return { room: null, contextVersion: 0 };
       if (state.ownerId !== userId) throw new Error("UserLimits owner mismatch");
+      state.lastBotRequestAt ??= state.lastRequestAt;
       await this.recover(state);
       const active = state.active;
-      return active ? rpcData(this.env.ROOMS.getByName(active.code).miniAppState(userId, active.membershipId)) : null;
+      const room = active ? await rpcData(this.env.ROOMS.getByName(active.code).miniAppState(userId, active.membershipId)) : null;
+      return { room, contextVersion: state.membershipSequence ?? 0 };
     });
   }
 

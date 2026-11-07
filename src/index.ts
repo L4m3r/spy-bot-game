@@ -3,7 +3,7 @@ import type { Update } from "grammy/types";
 import type { Env } from "./env";
 import { LOCATIONS, type Action, type Command } from "./model";
 import { rpcData } from "./rpc";
-import { getIdentity, roomCode } from "./identity";
+import { getIdentity } from "./identity";
 import { miniAppFetch } from "./miniapp";
 export { GameRoom } from "./room";
 export { UserLimits } from "./user-limits";
@@ -49,16 +49,16 @@ async function makeBot(env: Env, miniAppUrl: string) {
   bot.command("locations", ctx => ctx.reply(`Возможные локации (общий список для всех):\n\n${LOCATIONS.join("\n")}`));
   bot.command("game", async ctx => {
     if (!ctx.from) return;
-    await dispatch(ctx, "create", await roomCode(env.WEBHOOK_SECRET, ctx.from.id, ctx.update.update_id));
+    await dispatch(ctx, "create", "");
   });
   bot.command("leave", ctx => dispatch(ctx, "leave", "").then(() => undefined));
   bot.callbackQuery("locations", async ctx => {
-    await ctx.answerCallbackQuery();
+    try { await ctx.answerCallbackQuery(); } catch { /* The list is still useful after the acknowledgement expires. */ }
     await ctx.reply(`Возможные локации (общий список для всех):\n\n${LOCATIONS.join("\n")}`);
   });
   bot.callbackQuery(/^create(?::([0-9]{13}))?$/, async ctx => {
-    await ctx.answerCallbackQuery();
-    await dispatch(ctx, "create", await roomCode(env.WEBHOOK_SECRET, ctx.from.id, ctx.update.update_id), undefined, undefined, ctx.match[1] ? Number(ctx.match[1]) : undefined);
+    try { await ctx.answerCallbackQuery(); } catch { /* An expired acknowledgement must not block the room action. */ }
+    await dispatch(ctx, "create", "", undefined, undefined, ctx.match[1] ? Number(ctx.match[1]) : undefined);
   });
   bot.callbackQuery(/^(refresh|show|leave|deal|retry|confirm|close):([a-f0-9]{24})(?::([0-9]{1,9}))?(?::([0-9]{1,16}))?$/, async ctx => {
     // Acknowledge the button immediately; card delivery is done by the room alarm.
@@ -72,7 +72,7 @@ async function makeBot(env: Env, miniAppUrl: string) {
     const expectedMembershipId = ctx.match[4] === undefined ? undefined : Number(ctx.match[4]);
     if (expectedMembershipId !== undefined && !Number.isSafeInteger(expectedMembershipId)) return;
     const result = await dispatch(ctx, action, code, expectedRound, expectedMembershipId);
-    if (action === "confirm" && result && !result.error) {
+    if (action === "confirm" && result && !result.error && Number.isSafeInteger(result.confirmMembershipId)) {
       await ctx.reply("Закончить текущий раунд и раздать новые карточки?", {
         reply_markup: new InlineKeyboard().text("Да, новый раунд", `deal:${code}:${expectedRound}:${result.confirmMembershipId}`).row().text("Вернуться в комнату", `refresh:${code}:0:${result.confirmMembershipId}`),
       });

@@ -11,9 +11,9 @@ export async function getIdentity(token: string): Promise<UserFromGetMe> {
   catch (error) { botIdentity = undefined; throw error; }
 }
 
-export async function roomCode(secret: string, userId: number, updateId: number): Promise<string> {
+export async function roomCode(secret: string, userId: number, updateId: number, epoch?: string): Promise<string> {
   // Stable across Telegram retries, unpredictable without the server secret.
   const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const digest = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${userId}:${updateId}`));
+  const digest = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${userId}:${updateId}${epoch ? `:${epoch}` : ""}`));
   return Array.from(new Uint8Array(digest).slice(0, 12), byte => byte.toString(16).padStart(2, "0")).join("");
 }

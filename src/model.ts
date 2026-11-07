@@ -68,8 +68,11 @@ export interface Command {
   username: string;
   expectedRound?: number;
   expectedMembershipId?: number;
+  expectedContextVersion?: number;
   messageDate?: number;
   buttonCreatedAt?: number;
+  // Internal generation of Telegram update IDs; Mini App traffic never renews it.
+  botEpoch?: string;
   membershipId?: number;
   validUntil?: number;
   // Only the authenticated Mini App HTTP handler supplies these fields.

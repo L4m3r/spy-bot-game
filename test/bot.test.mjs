@@ -4,11 +4,12 @@ import { build } from "esbuild";
 import { Miniflare } from "miniflare";
 import { readFileSync } from "node:fs";
 import { createHmac } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 const config = JSON.parse(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
 
 const bundle = await build({
-  entryPoints: [new URL("../src/index.ts", import.meta.url).pathname],
+  entryPoints: [fileURLToPath(new URL("../src/index.ts", import.meta.url))],
   bundle: true, format: "esm", target: "es2022", platform: "browser",
   external: ["cloudflare:workers", "node:*"], write: false,
 });
@@ -78,7 +79,7 @@ async function until(condition) {
   throw new Error("Timed out waiting for background work");
 }
 
-async function fixture(t, { failGetMe = false, lobbyDelayMs = 0 } = {}) {
+async function fixture(t, { failGetMe = false, lobbyDelayMs = 0, failConfirmOnce = false, failCloseConfirmOnce = false, failCallbackAck = false } = {}) {
   const requests = [];
   const runtimeLogs = [];
   const failCards = new Set();
@@ -105,7 +106,17 @@ async function fixture(t, { failGetMe = false, lobbyDelayMs = 0 } = {}) {
         if (failGetMe) return respond({ ok: false, error_code: 401, description: `Unauthorized: 999:test-only-token ${SECRET}` }, 401);
         return respond({ ok: true, result: { id: 999, is_bot: true, first_name: "Шпион", username: "test_spy_bot" } });
       }
-      if (method === "answerCallbackQuery") return respond({ ok: true, result: true });
+      if (method === "answerCallbackQuery") return failCallbackAck
+        ? respond({ ok: false, error_code: 400, description: "Bad Request: query is too old" }, 400)
+        : respond({ ok: true, result: true });
+      if (method === "sendMessage" && data.text === "Закончить текущий раунд и раздать новые карточки?" && failConfirmOnce) {
+        failConfirmOnce = false;
+        return respond({ ok: false, error_code: 500, description: "Test confirmation delivery failure" }, 500);
+      }
+      if (method === "sendMessage" && data.text.startsWith("Ты организатор.") && failCloseConfirmOnce) {
+        failCloseConfirmOnce = false;
+        return respond({ ok: false, error_code: 500, description: "Test close confirmation delivery failure" }, 500);
+      }
       if (lobbyDelayMs && method === "sendMessage" && data.text.startsWith("🕵️ Комната")) {
         await new Promise(resolve => setTimeout(resolve, lobbyDelayMs));
       }
@@ -175,7 +186,17 @@ async function fixture(t, { failGetMe = false, lobbyDelayMs = 0 } = {}) {
     if (limits?.lastMiniAppMembershipAt) update.message.date = Math.floor(limits.lastMiniAppMembershipAt / 1000) + 1;
     await send(update);
   }
-  return { mf, requests, failCards, failLobbies, deletedMessages, post, send, message, callback, create, join, runtimeLogs, objectStorage };
+  async function creationCode(id, updateId) {
+    // Fault injection needs the room's address before its first dispatch.
+    // Seed only the durable Telegram generation, then use its actual HMAC input.
+    const limits = await objectStorage('USER_LIMITS', id);
+    const state = await limits.get('limits') ?? { ownerId: id, creations: [], lastUpdateId: -1, lastRequestAt: Date.now() };
+    state.botEpoch ??= crypto.randomUUID();
+    state.lastBotRequestAt ??= Date.now();
+    await limits.put('limits', state);
+    return createHmac('sha256', SECRET).update(`${id}:${updateId}:${state.botEpoch}`).digest('hex').slice(0, 24);
+  }
+  return { mf, requests, failCards, failLobbies, deletedMessages, post, send, message, callback, create, join, runtimeLogs, objectStorage, creationCode };
 }
 
 test("webhook rejects unauthorized and malformed updates; health requires no Telegram calls", async t => {
@@ -507,7 +528,7 @@ for (const fault of ["before", "after"]) {
   test(`creation interrupted ${fault} GameRoom commit resumes after eviction without another quota slot`, async t => {
     const f = await fixture(t);
     const update = f.message(1, "/game");
-    const code = createHmac("sha256", SECRET).update(`1:${update.update_id}`).digest("hex").slice(0, 24);
+    const code = await f.creationCode(1, update.update_id);
     const room = await f.objectStorage("ROOMS", code);
     const limits = await f.objectStorage("USER_LIMITS", 1);
     await room.put("__testFailCreate", fault);
@@ -537,7 +558,7 @@ test("UserLimits can be evicted after a successful close", async t => {
 test("close after an interrupted creation clears the reservation and prevents resurrection", async t => {
   const f = await fixture(t);
   const update = f.message(1, "/game");
-  const code = createHmac("sha256", SECRET).update(`1:${update.update_id}`).digest("hex").slice(0, 24);
+  const code = await f.creationCode(1, update.update_id);
   const room = await f.objectStorage("ROOMS", code);
   const limits = await f.objectStorage("USER_LIMITS", 1);
   await room.put("__testFailCreate", "after");
@@ -552,7 +573,7 @@ test("close after an interrupted creation clears the reservation and prevents re
 test("an expired unresolved reservation is discarded without recreating its room", async t => {
   const f = await fixture(t);
   const update = f.message(1, "/game");
-  const code = createHmac("sha256", SECRET).update(`1:${update.update_id}`).digest("hex").slice(0, 24);
+  const code = await f.creationCode(1, update.update_id);
   const room = await f.objectStorage("ROOMS", code);
   const limits = await f.objectStorage("USER_LIMITS", 1);
   await room.put("__testFailCreate", "before");
@@ -572,7 +593,7 @@ for (const fault of ["before", "after"]) {
   test(`close interrupted ${fault} room deletion is recovered before any pending creation`, async t => {
     const f = await fixture(t);
     const update = f.message(1, "/game");
-    const code = createHmac("sha256", SECRET).update(`1:${update.update_id}`).digest("hex").slice(0, 24);
+    const code = await f.creationCode(1, update.update_id);
     const room = await f.objectStorage("ROOMS", code);
     const limits = await f.objectStorage("USER_LIMITS", 1);
     await room.put("__testFailCreate", "after");
@@ -1016,6 +1037,10 @@ function appAction(action, code, expectedRound) {
   return { action, code, expectedRound, requestId: `${appClock}:${crypto.randomUUID()}` };
 }
 async function miniApp(f, id, path, body, { initData = signedMiniAppData(id), origin = 'https://bot.test', method, raw } = {}) {
+  if (body && ['create', 'join'].includes(body.action) && body.contextVersion === undefined) {
+    const limits = await (await f.objectStorage('USER_LIMITS', id)).get('limits');
+    body.contextVersion = limits?.membershipSequence ?? 0;
+  }
   if (body && ['deal', 'leave', 'close'].includes(body.action) && body.membershipVersion === undefined) {
     const limits = await (await f.objectStorage('USER_LIMITS', id)).get('limits');
     body.membershipVersion = limits?.active?.membershipId ?? 1;
@@ -1220,3 +1245,211 @@ test('stale roomless create buttons cannot recreate after an app transition', as
   await f.send(await f.callback(1, fresh));
   assert((await miniApp(f, 1, 'state')).data.room);
 });
+
+test('confirmation replay after failed delivery and eviction keeps a working membership-bound button', async t => {
+  const f = await fixture(t, { failConfirmOnce: true });
+  const room = await f.create();
+  await f.join(room.code, 2); await f.join(room.code, 3);
+  await f.send(await f.callback(1, `deal:${room.code}:0`));
+  await until(async () => (await room.state()).jobs.length === 0);
+  const confirm = await f.callback(1, `confirm:${room.code}:1`);
+  assert.equal((await f.post(confirm)).status, 500);
+  await f.mf.unsafeEvictDurableObject('spy-test', 'TestUserLimits', { name: '1' });
+  await f.send(confirm);
+  const prompt = f.requests.findLast(request => request.text === 'Закончить текущий раунд и раздать новые карточки?');
+  const next = prompt.reply_markup.inline_keyboard[0][0].callback_data;
+  assert.match(next, /^deal:[a-f0-9]{24}:1:[0-9]{1,16}$/);
+  await f.send(await f.callback(1, next));
+  assert.equal((await room.state()).round.number, 2);
+  // Once another bot action supersedes the confirm, an old retry cannot
+  // manufacture a prompt without the persisted context of that update.
+  const count = f.requests.filter(request => request.text === prompt.text).length;
+  await f.send(confirm);
+  assert.equal(f.requests.filter(request => request.text === prompt.text).length, count);
+});
+
+test('Mini App traffic preserves the bot delivery-window fence but does not renew its idle timestamp', async t => {
+  const f = await fixture(t);
+  const room = await f.create(); await f.join(room.code, 2);
+  const limits = await f.objectStorage('USER_LIMITS', 2);
+  const state = await limits.get('limits');
+  state.lastBotRequestAt = Date.now() - TTL + 60_000;
+  await limits.put('limits', state);
+  // An app action saves a fresh lastRequestAt, while bot ordering remains
+  // tied to its own timestamp and epoch.
+  await miniApp(f, 2, 'action', appAction('join', room.code));
+  const after = await limits.get('limits');
+  assert.equal(after.lastBotRequestAt, state.lastBotRequestAt);
+  assert(after.lastRequestAt > state.lastBotRequestAt);
+  await f.send(f.message(2, '/leave', state.lastUpdateId - 1));
+  assert.equal((await limits.get('limits')).active.membershipId, state.active.membershipId);
+  assert.equal((await limits.get('limits')).botEpoch, state.botEpoch);
+});
+
+test('bot update IDs restart after an idle week without colliding with the room dedup cache', async t => {
+  const f = await fixture(t);
+  const room = await f.create(); await f.join(room.code, 2); await f.join(room.code, 3);
+  const firstDeal = await f.callback(1, `deal:${room.code}:0`);
+  await f.send(firstDeal);
+  await until(async () => (await room.state()).jobs.length === 0);
+  await miniApp(f, 1, 'action', appAction('deal', room.code, 1));
+  await until(async () => (await room.state()).jobs.length === 0);
+  const limits = await f.objectStorage('USER_LIMITS', 1);
+  const old = await limits.get('limits');
+  old.lastBotRequestAt = Date.now() - 8 * TTL;
+  await limits.put('limits', old);
+  await f.mf.unsafeEvictDurableObject('spy-test', 'TestUserLimits', { name: '1' });
+  const restarted = await f.callback(1, `deal:${room.code}:2`);
+  restarted.update_id = firstDeal.update_id; // Same numeric ID, new Telegram generation.
+  await f.send(restarted);
+  const fresh = await limits.get('limits');
+  assert.notEqual(fresh.botEpoch, old.botEpoch);
+  assert.equal((await room.state()).round.number, 3);
+  const keys = (await room.state()).processed.filter(key => typeof key === 'string' && key.endsWith(':' + firstDeal.update_id));
+  assert.equal(keys.length, 2);
+  assert.notEqual(keys[0], keys[1]);
+});
+
+test('a lower Telegram update ID after an idle week is accepted despite recent Mini App actions', async t => {
+  const f = await fixture(t);
+  const room = await f.create(); await f.join(room.code, 2);
+  const limits = await f.objectStorage('USER_LIMITS', 2);
+  const old = await limits.get('limits');
+  old.lastBotRequestAt = Date.now() - 8 * TTL;
+  await limits.put('limits', old);
+  await miniApp(f, 2, 'action', appAction('join', room.code));
+  await f.send(f.message(2, '/leave', old.lastUpdateId - 1));
+  assert.equal((await limits.get('limits')).active, undefined);
+  assert(!(await room.state()).members.some(player => player.id === 2));
+});
+
+test('reused bot creation IDs have different invitation codes in a new dedup epoch', async t => {
+  const f = await fixture(t);
+  const original = await f.create();
+  const limits = await f.objectStorage('USER_LIMITS', 1);
+  const before = await limits.get('limits');
+  await miniApp(f, 1, 'action', appAction('close', original.code));
+  const closed = await limits.get('limits');
+  closed.lastBotRequestAt = Date.now() - 8 * TTL;
+  await limits.put('limits', closed);
+  const fresh = f.message(1, '/game', original.update.update_id);
+  fresh.message.date = Math.floor(closed.lastMiniAppMembershipAt / 1000) + 1;
+  await f.send(fresh);
+  const created = await limits.get('limits');
+  assert(created.active);
+  assert.notEqual(created.botEpoch, before.botEpoch);
+  assert.notEqual(created.active.code, original.code);
+  await f.send(fresh);
+  assert.equal((await limits.get('limits')).active.code, created.active.code);
+  assert.equal((await limits.get('limits')).creations.length, 2);
+});
+
+test('an expired create acknowledgement does not prevent creation or duplicate recovery', async t => {
+  const f = await fixture(t, { failCallbackAck: true });
+  const create = await f.callback(1, `create:${Date.now()}`);
+  await f.send(create);
+  const limits = await f.objectStorage('USER_LIMITS', 1);
+  const created = await limits.get('limits');
+  assert(created.active?.owner);
+  await f.send(create);
+  assert.equal((await limits.get('limits')).active.code, created.active.code);
+  assert.equal((await limits.get('limits')).creations.length, 1);
+  await f.send(await f.callback(1, 'locations'));
+  assert(f.requests.some(request => request.text?.startsWith('Возможные локации (общий список для всех):')));
+});
+
+test('owner leave confirmation survives a failed delivery and eviction', async t => {
+  const f = await fixture(t, { failCloseConfirmOnce: true });
+  const room = await f.create();
+  const leave = f.message(1, '/leave');
+  assert.equal((await f.post(leave)).status, 500);
+  await f.mf.unsafeEvictDurableObject('spy-test', 'TestUserLimits', { name: '1' });
+  await f.send(leave);
+  const prompt = f.requests.findLast(request => request.text?.startsWith('Ты организатор.'));
+  const close = prompt.reply_markup.inline_keyboard[0][0].callback_data;
+  assert.match(close, /^close:[a-f0-9]{24}:0:[0-9]{1,16}$/);
+  await f.send(await f.callback(1, close));
+  assert.equal(await room.state(), undefined);
+});
+
+test('a restarted bot epoch is durable before a lost normal RPC response', async t => {
+  const f = await fixture(t);
+  const room = await f.create(); await f.join(room.code, 2); await f.join(room.code, 3);
+  const limits = await f.objectStorage('USER_LIMITS', 1);
+  const old = await limits.get('limits');
+  old.lastBotRequestAt = Date.now() - 8 * TTL;
+  await limits.put('limits', old);
+  await room.storage.put('__testFailDeal', 'after');
+  const deal = await f.callback(1, `deal:${room.code}:0`);
+  deal.update_id = old.lastUpdateId - 1;
+  assert.equal((await f.post(deal)).status, 500);
+  const interrupted = await limits.get('limits');
+  assert.notEqual(interrupted.botEpoch, old.botEpoch);
+  assert(interrupted.lastBotRequestAt > Date.now() - 10_000);
+  await f.mf.unsafeEvictDurableObject('spy-test', 'TestUserLimits', { name: '1' });
+  await f.send(deal);
+  assert.equal((await limits.get('limits')).botEpoch, interrupted.botEpoch);
+  assert.equal((await room.state()).round.number, 1);
+  assert(!f.requests.some(request => request.text?.includes('Эта кнопка от старого раунда')));
+});
+
+test('a legacy bot timestamp is frozen before continued Mini App activity', async t => {
+  const f = await fixture(t);
+  const room = await f.create(); await f.join(room.code, 2);
+  const limits = await f.objectStorage('USER_LIMITS', 2);
+  const legacy = await limits.get('limits');
+  delete legacy.lastBotRequestAt;
+  delete legacy.botEpoch;
+  legacy.lastRequestAt = Date.now() - 8 * TTL;
+  await limits.put('limits', legacy);
+  await miniApp(f, 2, 'action', appAction('join', room.code));
+  const renewed = await limits.get('limits');
+  assert.equal(renewed.lastBotRequestAt, legacy.lastRequestAt);
+  assert(renewed.lastRequestAt > legacy.lastRequestAt);
+  await f.send(f.message(2, '/leave', legacy.lastUpdateId - 1));
+  assert.equal((await limits.get('limits')).active, undefined);
+});
+
+test('a lost normal RPC renews its existing bot epoch before the old idle deadline', async t => {
+  const f = await fixture(t);
+  const room = await f.create();
+  const limits = await f.objectStorage('USER_LIMITS', 1);
+  const before = await limits.get('limits');
+  before.lastBotRequestAt = Date.now() - TTL + 60_000;
+  await limits.put('limits', before);
+  await room.storage.put('__testFailShow', 'after');
+  const show = f.message(1, '/game');
+  assert.equal((await f.post(show)).status, 500);
+  const interrupted = await limits.get('limits');
+  assert.equal(interrupted.botEpoch, before.botEpoch);
+  assert(interrupted.lastBotRequestAt > Date.now() - 10_000);
+  assert.equal(interrupted.lastUpdateId, before.lastUpdateId);
+  await f.mf.unsafeEvictDurableObject('spy-test', 'TestUserLimits', { name: '1' });
+  await f.send(show);
+  assert.equal((await limits.get('limits')).botEpoch, before.botEpoch);
+});
+
+for (const action of ['join', 'create']) {
+  test(`an old Mini App ${action} cannot restore absence after a bot membership cycle`, async t => {
+    const f = await fixture(t);
+    const room = await f.create();
+    const empty = await miniApp(f, 2, 'state');
+    assert.equal(empty.data.contextVersion, 0);
+    const delayed = { ...appAction(action, action === 'join' ? room.code : undefined), contextVersion: empty.data.contextVersion };
+    await f.join(room.code, 2);
+    await f.send(f.message(2, '/leave'));
+    const absent = await miniApp(f, 2, 'state');
+    assert.equal(absent.data.room, null);
+    assert(absent.data.contextVersion > empty.data.contextVersion);
+    const stale = await miniApp(f, 2, 'action', delayed);
+    assert.equal(stale.status, 409);
+    assert.equal((await miniApp(f, 2, 'state')).data.room, null);
+    const freshRequest = { ...appAction(action, action === 'join' ? room.code : undefined), contextVersion: absent.data.contextVersion };
+    const fresh = await miniApp(f, 2, 'action', freshRequest);
+    assert.equal(fresh.status, 200);
+    assert(fresh.data.room);
+    // Idempotency is checked before the context precondition: this exact
+    // successful entry can be replayed despite advancing its context version.
+    assert.equal((await miniApp(f, 2, 'action', freshRequest)).status, 200);
+  });
+}

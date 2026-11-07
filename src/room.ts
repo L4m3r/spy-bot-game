@@ -122,7 +122,8 @@ export class GameRoom extends DurableObject<Env> {
       } else if (!member) {
         return { error: "Ты не в этой комнате. Подключись по приглашению." };
       }
-      const operationId = command.requestId ? `app:${command.actor.id}:${command.requestId}` : command.updateId;
+      const operationId = command.requestId ? `app:${command.actor.id}:${command.requestId}`
+        : command.botEpoch ? `bot:${command.actor.id}:${command.botEpoch}:${command.updateId}` : command.updateId;
       if (state.processed.includes(operationId)) return {};
       const roundNumber = state.round?.number ?? 0;
       if (["deal", "retry", "confirm"].includes(command.action) && command.expectedRound !== roundNumber) {

@@ -31,11 +31,12 @@ let locations = [
 const state = {
   screen: 'home', trail: [], room: false, owner: true, players: [me],
   round: 0, inRound: true, spy: false, location: null, revealed: false,
-  roomCode: null, membershipVersion: null, ownerId: null, ownerName: '', botUsername: '', invitation: null, privateCard: null, error: '', ready: __SPY_PREVIEW__,
+  roomCode: null, membershipVersion: null, contextVersion: 0, ownerId: null, ownerName: '', botUsername: '', invitation: null, privateCard: null, error: '', ready: __SPY_PREVIEW__,
   botDeliveryFailed: false, joinValue: '', joinError: '', theme: params.get('theme') || 'system',
 };
 let primary = null;
 let pending = false;
+let mutationActive = false;
 let generation = 0;
 let dialogResolve = null;
 let nativeAction = false;
@@ -219,7 +220,7 @@ function reachableScreen(screen) {
 }
 function go(screen, { replace = false } = {}) {
   screen = reachableScreen(screen);
-  generation++; pending = false; conceal(false); speak('');
+  generation++; pending = mutationActive; conceal(false); speak('');
   if (screen === 'home') state.trail = [];
   else if (screen === 'lobby') state.trail = ['home'];
   else if (screen === 'round') state.trail = ['home', 'lobby'];
@@ -228,7 +229,7 @@ function go(screen, { replace = false } = {}) {
   scrollTo(0, 0); render({ animate: true });
 }
 function goBack() {
-  conceal(false); pending = false; generation++; speak('');
+  conceal(false); pending = mutationActive; generation++; speak('');
   state.screen = reachableScreen(state.trail.pop() || (state.room ? 'lobby' : 'home'));
   scrollTo(0, 0); render({ animate: true });
 }
@@ -418,10 +419,12 @@ async function refreshLive({ force = false } = {}) {
     const data = await api('state');
     if (version !== refreshVersion) return;
     setServerTime(data.serverTime);
-    me = { ...data.user, tone: 0 }; state.botUsername = data.botUsername; locations = data.locations;
+    state.contextVersion = data.contextVersion; me = { ...data.user, tone: 0 }; state.botUsername = data.botUsername; locations = data.locations;
     const previous = JSON.stringify([state.roomCode, state.membershipVersion, state.round, state.players, state.botDeliveryFailed]);
     applyRoom(data.room);
     const changed = previous !== JSON.stringify([state.roomCode, state.membershipVersion, state.round, state.players, state.botDeliveryFailed]);
+    // Own membership affects the invitation CTA even when its separate request fails.
+    if ((changed || force) && ['home', 'lobby', 'round', 'closed', 'invitation'].includes(state.screen)) render({ focus: false });
     if (invitationCode && navigation === generation && state.screen === 'invitation' && state.invitation?.code === invitationCode) {
       try {
         const { invitation } = await api('invitation?code=' + invitationCode);
@@ -454,7 +457,7 @@ async function startLive() {
   starting = true; state.screen = 'loading'; state.error = ''; render();
   try {
     const data = await api('state');
-    me = { ...data.user, tone: 0 }; locations = data.locations; state.botUsername = data.botUsername;
+    state.contextVersion = data.contextVersion; me = { ...data.user, tone: 0 }; locations = data.locations; state.botUsername = data.botUsername;
     setServerTime(data.serverTime); applyRoom(data.room); state.ready = true;
     const start = new URLSearchParams(telegram.initData).get('start_param') ?? '';
     const code = params.get('room') || /^room_([a-f0-9]{24})$/.exec(start)?.[1];
@@ -462,19 +465,43 @@ async function startLive() {
       try {
         state.invitation = (await api('invitation?code=' + code)).invitation;
         go('invitation');
-      } catch (error) { state.error = error.message; go('closed'); }
+      } catch (error) {
+        if (error.status !== 404) throw error;
+        state.invitation = null; state.error = error.message; go('closed');
+      }
     } else go(state.room ? state.round ? 'round' : 'lobby' : 'home');
   } catch (error) { state.ready = false; state.error = error.message; state.screen = 'unavailable'; render(); }
   finally { starting = false; schedulePoll(); }
 }
 
-async function mutate(action, { code = state.roomCode, round = state.round, membershipVersion = state.membershipVersion } = {}) {
-  pending = true; refreshVersion++; clearTimeout(pollTimer); state.error = ''; render({ focus: false });
+async function mutate(action, { code = state.roomCode, round = state.round, membershipVersion = state.membershipVersion, contextVersion = state.contextVersion } = {}) {
+  if (mutationActive) return null;
+  const navigation = generation;
+  mutationActive = pending = true; refreshVersion++; clearTimeout(pollTimer); state.error = ''; render({ focus: false });
+  let result;
+  let failure;
   try {
-    const result = await api('action', actionRequest(action, code, round, membershipVersion));
-    applyRoom(result.room);
-    return result;
-  } finally { pending = false; refreshVersion++; schedulePoll(); }
+    try { result = await api('action', actionRequest(action, code, round, membershipVersion, contextVersion)); }
+    catch (error) { failure = error; }
+    // A POST response can be held while a different client changes the room.
+    // Re-read after it arrives, including when its outcome is uncertain.
+    const data = await api('state');
+    setServerTime(data.serverTime);
+    state.contextVersion = data.contextVersion; me = { ...data.user, tone: 0 }; locations = data.locations; state.botUsername = data.botUsername;
+    applyRoom(data.room);
+    if (failure) throw failure;
+    const stillCurrent = navigation === generation
+      && (result.room?.code ?? null) === state.roomCode
+      && (result.room?.membershipVersion ?? null) === state.membershipVersion
+      && (result.room?.round ?? 0) === state.round;
+    return stillCurrent ? result : null;
+  } catch (error) {
+    if (navigation === generation) throw error;
+    return null;
+  } finally {
+    mutationActive = pending = false; refreshVersion++; schedulePoll();
+    render({ focus: false });
+  }
 }
 
 async function liveDispatch(action) {
@@ -518,18 +545,20 @@ async function liveDispatch(action) {
       return;
     }
     if (action === 'create' || action === 'accept-invite') {
-      await mutate(action === 'create' ? 'create' : 'join', action === 'accept-invite' ? { code: state.invitation.code } : {});
+      if (!await mutate(action === 'create' ? 'create' : 'join', action === 'accept-invite' ? { code: state.invitation.code } : {})) return;
       go(state.round ? 'round' : 'lobby'); return;
     }
     if (action === 'deal' || action === 'next') {
       const target = { code: state.roomCode, round: state.round, membershipVersion: state.membershipVersion };
       if (target.round && !await confirm('Начать следующий раунд?', 'Текущие карточки перестанут действовать. Все участники получат новые роли.', 'Новый раунд')) return;
-      await mutate('deal', target); go('round'); feedback('Роли назначены. Открой свою карточку.'); return;
+      if (!await mutate('deal', target)) return;
+      go('round'); feedback('Роли назначены. Открой свою карточку.'); return;
     }
     if (action === 'close' || action === 'leave') {
       const target = { code: state.roomCode, round: state.round, membershipVersion: state.membershipVersion };
       if (!await confirm(action === 'close' ? 'Закрыть комнату?' : 'Выйти из комнаты?', action === 'close' ? 'Все участники потеряют доступ к этой комнате.' : 'Вернуться можно по приглашению. Карточка появится со следующего раунда.', action === 'close' ? 'Закрыть' : 'Выйти', true)) return;
-      await mutate(action, target); go('home'); return;
+      if (!await mutate(action, target)) return;
+      go('home'); return;
     }
     if (action === 'hide') { conceal(); document.querySelector('#role-card [data-action="reveal"]')?.focus(); return; }
     if (action === 'reveal' && state.inRound && !roleLoading) {

@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 // Local-only UI integration fixture. Never imported by or deployed with the Worker.
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -5,7 +6,7 @@ import { build } from 'esbuild';
 import { Miniflare } from 'miniflare';
 import { createHmac } from 'node:crypto';
 const config = JSON.parse(await readFile(new URL('../wrangler.jsonc', import.meta.url), 'utf8'));
-const bundle = await build({ entryPoints: [new URL('../src/index.ts', import.meta.url).pathname], bundle: true, format: 'esm', target: 'es2022', platform: 'browser', external: ['cloudflare:workers','node:*'], write: false });
+const bundle = await build({ entryPoints: [fileURLToPath(new URL('../src/index.ts', import.meta.url))], bundle: true, format: 'esm', target: 'es2022', platform: 'browser', external: ['cloudflare:workers','node:*'], write: false });
 const token = '999:local-fixture-not-a-real-token';
 let messageId = 1;
 const mf = new Miniflare({ modules: true, script: bundle.outputFiles[0].text,
