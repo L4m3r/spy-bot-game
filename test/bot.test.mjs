@@ -211,6 +211,22 @@ test("webhook rejects unauthorized and malformed updates; health requires no Tel
   assert.equal(f.requests.length, 0);
 });
 
+test('new bot launch buttons open the origin root for bot and Mini App rooms', async t => {
+  const f = await fixture(t);
+  await f.send(f.message(1, '/help'));
+  const welcome = f.requests.find(request => request.text?.startsWith('🕵️ Шпион'));
+  assert.equal(welcome.reply_markup.inline_keyboard.flat().find(button => button.web_app).web_app.url, 'https://bot.test/');
+  const room = await f.create();
+  const fromApp = await miniApp(f, 2, 'action', appAction('create'));
+  assert.equal(fromApp.status, 200);
+  for (const [id, code] of [[1, room.code], [2, fromApp.data.room.code]]) {
+    const message = await until(() => f.requests.find(request => request.chat_id === id
+      && request.reply_markup?.inline_keyboard.flat().some(button => button.web_app?.url.includes(code))));
+    const url = message.reply_markup.inline_keyboard.flat().find(button => button.web_app).web_app.url;
+    assert.equal(url, 'https://bot.test/?room=' + code);
+  }
+});
+
 test("room creation and joins survive duplicate updates; only owner deals", async t => {
   const f = await fixture(t);
   const room = await f.create();
