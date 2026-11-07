@@ -9,6 +9,9 @@ await build({ entryPoints: [fileURLToPath(new URL('app.js', source))], outfile: 
   bundle: true, format: 'esm', target: 'es2022', define: { __SPY_PREVIEW__: 'false' }, minify: true, charset: 'utf8' });
 await copyFile(new URL('index.html', source), new URL('index.html', output));
 await copyFile(new URL('app.css', source), new URL('app.css', output));
+// BotFather may still open the origin root. Redirect at the assets layer so
+// the canonical Mini App keeps its relative JS/CSS paths without a Worker call.
+await writeFile(new URL('../_redirects', output), '/ /miniapp/ 302\n');
 await writeFile(new URL('../_headers', output), `/miniapp/*
   Cache-Control: no-cache
   Referrer-Policy: no-referrer
